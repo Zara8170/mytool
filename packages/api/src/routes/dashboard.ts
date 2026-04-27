@@ -315,6 +315,37 @@ dashboardRoute.get("/:projectId/sessions/:sessionId", async (c) => {
     },
   );
 
+  // 프로젝트 기준선 조회 후 세션 이상치와 비교
+  const [baselines, sessionOutliers] = await Promise.all([
+    prisma.projectToolBaseline.findMany({
+      where: { projectId },
+      select: { toolName: true, p50Ms: true },
+    }),
+    prisma.sessionOutlierEvent.findMany({
+      where: { sessionId },
+      select: { toolName: true, medianMs: true },
+    }),
+  ]);
+
+  const baselineMap = new Map(baselines.map((b) => [b.toolName, b.p50Ms]));
+  const sessionMedians = new Map<string, number>();
+  for (const o of sessionOutliers) {
+    if (!sessionMedians.has(o.toolName)) {
+      sessionMedians.set(o.toolName, o.medianMs);
+    }
+  }
+
+  const baselineComparison = [...sessionMedians.entries()]
+    .filter(([toolName]) => baselineMap.has(toolName))
+    .map(([toolName, sessionMedianMs]) => ({
+      toolName,
+      sessionMedianMs,
+      projectP50Ms: baselineMap.get(toolName)!,
+      ratio: Math.round((sessionMedianMs / baselineMap.get(toolName)!) * 10) / 10,
+    }))
+    .filter((b) => b.ratio > 1.5)
+    .sort((a, b) => b.ratio - a.ratio);
+
   return c.json({
     id: session.id,
     userId: session.userId,
@@ -336,6 +367,7 @@ dashboardRoute.get("/:projectId/sessions/:sessionId", async (c) => {
       estimatedCostUsd:
         Math.round(u.estimatedCostUsd * 1_000_000) / 1_000_000,
     })),
+    baselineComparison,
   });
 });
 

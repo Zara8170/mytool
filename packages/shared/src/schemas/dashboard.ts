@@ -115,7 +115,16 @@ export const SessionDetailSchema = z.object({
   cacheReadInputTokens: z.number().int(),
   cacheCreationInputTokens: z.number().int(),
   estimatedCostUsd: z.number(),
+  outlierCount: z.number().int().nullable().optional(),
+  outlierRatio: z.number().nullable().optional(),
   usageByModel: z.array(UsageBreakdownItemSchema),
+  baselineComparison: z.array(z.object({
+    toolName: z.string(),
+    sessionMedianMs: z.number().int(),
+    projectP50Ms: z.number().int(),
+    ratio: z.number(),
+  })).optional(),
+  messageCount: z.number().int().optional(),
 });
 export type SessionDetail = z.infer<typeof SessionDetailSchema>;
 
