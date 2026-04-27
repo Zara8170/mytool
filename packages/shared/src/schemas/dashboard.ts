@@ -19,6 +19,8 @@ export const DashboardSummarySchema = z.object({
     z.object({
       skillName: z.string(),
       callCount: z.number().int(),
+      failedCount: z.number().int(),
+      failureRate: z.number(),
     }),
   ),
   topAgentTypes: z.array(

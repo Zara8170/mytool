@@ -27,12 +27,33 @@ export default async function SkillsPage({ params }: PageProps) {
               tool invocations will appear here.
             </p>
           ) : (
-            <BarList
-              rows={summary.topSkills.map((s) => ({
-                label: s.skillName,
-                value: s.callCount,
-              }))}
-            />
+            <ul className="space-y-2">
+              {summary.topSkills.map((s) => (
+                <li key={s.skillName}>
+                  <div className="flex justify-between text-sm mb-0.5">
+                    <span className="font-mono">{s.skillName}</span>
+                    <div className="flex gap-3 items-center">
+                      <span className="text-muted tabular-nums">
+                        {s.callCount.toLocaleString()}회
+                      </span>
+                      {s.failedCount > 0 ? (
+                        <span className="text-red-400 text-xs">
+                          실패 {(s.failureRate * 100).toFixed(0)}%
+                        </span>
+                      ) : (
+                        <span className="text-green-600 text-xs">✓</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="h-1.5 bg-bg rounded">
+                    <div
+                      className="h-full bg-accent rounded"
+                      style={{ width: `${(s.callCount / summary.topSkills[0]!.callCount) * 100}%` }}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
 

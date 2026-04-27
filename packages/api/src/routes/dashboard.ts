@@ -56,7 +56,7 @@ dashboardRoute.get(
 
     const userFilter = filterUserId ? { userId: filterUserId } : {};
 
-    const [totalSessions, activeUsersAgg, usageAgg, topSkillsRaw, topAgentsRaw] =
+    const [totalSessions, activeUsersAgg, usageAgg, topSkillsRaw, topAgentsRaw, topSkillFailsRaw] =
       await Promise.all([
         prisma.claudeSession.count({
           where: { projectId, startedAt: { gte: from, lte: to }, ...userFilter },
@@ -102,6 +102,18 @@ dashboardRoute.get(
           orderBy: { _count: { agentType: "desc" } },
           take: 10,
         }),
+        prisma.event.groupBy({
+          by: ["skillName"],
+          where: {
+            projectId,
+            timestamp: { gte: from, lte: to },
+            isSkillCall: true,
+            skillName: { not: null },
+            exitCode: { not: 0 },
+            ...userFilter,
+          },
+          _count: { _all: true },
+        }),
       ]);
 
     const outlierSessionFilter = filterUserId
@@ -133,9 +145,25 @@ dashboardRoute.get(
       totalCacheReadTokens: usageAgg._sum.cacheReadInputTokens ?? 0,
       totalCacheCreationTokens: usageAgg._sum.cacheCreationInputTokens ?? 0,
       estimatedCostUsd: Number(usageAgg._sum.estimatedCostUsd ?? 0),
-      topSkills: topSkillsRaw
-        .filter((r) => r.skillName)
-        .map((r) => ({ skillName: r.skillName!, callCount: r._count._all })),
+      topSkills: (() => {
+        const failMap = new Map(
+          topSkillFailsRaw
+            .filter((r) => r.skillName)
+            .map((r) => [r.skillName!, r._count._all]),
+        );
+        return topSkillsRaw
+          .filter((r) => r.skillName)
+          .map((r) => {
+            const total = r._count._all;
+            const failed = failMap.get(r.skillName!) ?? 0;
+            return {
+              skillName: r.skillName!,
+              callCount: total,
+              failedCount: failed,
+              failureRate: total > 0 ? failed / total : 0,
+            };
+          });
+      })(),
       topAgentTypes: topAgentsRaw
         .filter((r) => r.agentType)
         .map((r) => ({ agentType: r.agentType!, callCount: r._count._all })),
