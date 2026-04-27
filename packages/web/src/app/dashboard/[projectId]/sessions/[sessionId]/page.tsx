@@ -45,6 +45,8 @@ type PairedResult = {
   postResponse: string | null;
 };
 
+const OUTLIER_EXCLUDED_TOOLS = new Set(["Agent"]);
+
 function pairEvents(events: EventItem[]): PairedResult[] {
   const postBuckets = new Map<string, EventItem[]>();
   for (const e of events.filter((e) => e.hookEventName === "PostToolUse")) {
@@ -56,6 +58,7 @@ function pairEvents(events: EventItem[]): PairedResult[] {
   const results: PairedResult[] = [];
 
   for (const pre of events.filter((e) => e.hookEventName === "PreToolUse")) {
+    const excluded = OUTLIER_EXCLUDED_TOOLS.has(pre.toolName ?? "");
     const bucket = postBuckets.get(pre.toolName ?? "__none__") ?? [];
     const match = bucket.find(
       (p) =>
@@ -70,7 +73,7 @@ function pairEvents(events: EventItem[]): PairedResult[] {
       preId: pre.id,
       pre,
       durationMs,
-      hasMatch: match !== undefined,
+      hasMatch: match !== undefined && !excluded,
       postResponse: match?.toolResponse ?? null,
     });
   }

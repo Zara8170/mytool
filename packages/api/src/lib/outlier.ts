@@ -42,7 +42,12 @@ export async function computeSessionOutlierStats(
   const usedPostIndices = new Map<string, Set<number>>();
   const pairs: { toolName: string | null; durationMs: number }[] = [];
 
+  // Agent는 작업 규모에 따라 소요시간 편차가 너무 커서 상대적 임계치 기반 이상치 탐지가 무의미함
+  const EXCLUDED_TOOLS = new Set(["Agent"]);
+
   for (const pre of preEvents) {
+    if (EXCLUDED_TOOLS.has(pre.toolName ?? "")) continue;
+
     const key = pre.toolName ?? "__none__";
     const bucket = postBuckets.get(key) ?? [];
     if (!usedPostIndices.has(key)) usedPostIndices.set(key, new Set());
