@@ -80,17 +80,39 @@ function pairEvents(events: EventItem[]): PairedResult[] {
   return results;
 }
 
+const MIN_SAMPLES_FOR_OUTLIER = 3;
+
+function perToolMedianThresholds(pairs: PairedResult[]): Map<string, number> {
+  const groups = new Map<string, number[]>();
+  for (const p of pairs) {
+    if (!p.hasMatch) continue;
+    const key = p.pre.toolName ?? "__none__";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(p.durationMs);
+  }
+  const thresholds = new Map<string, number>();
+  for (const [key, durations] of groups) {
+    if (durations.length < MIN_SAMPLES_FOR_OUTLIER) continue;
+    const sorted = [...durations].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)]!;
+    thresholds.set(key, median * 10);
+  }
+  return thresholds;
+}
+
 function buildRibbonSegments(pairs: PairedResult[]): RibbonSegment[] {
-  const matched = pairs.filter((p) => p.hasMatch);
-  const sorted = [...matched.map((p) => p.durationMs)].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)] ?? 1;
-  return pairs.map((p) => ({
-    id: p.preId,
-    label: toolLabel(p.pre),
-    colorKey: colorKey(p.pre),
-    durationMs: p.durationMs,
-    isOutlier: p.hasMatch && p.durationMs > median * 10,
-  }));
+  const thresholds = perToolMedianThresholds(pairs);
+  return pairs.map((p) => {
+    const key = p.pre.toolName ?? "__none__";
+    const threshold = thresholds.get(key);
+    return {
+      id: p.preId,
+      label: toolLabel(p.pre),
+      colorKey: colorKey(p.pre),
+      durationMs: p.durationMs,
+      isOutlier: p.hasMatch && threshold !== undefined && p.durationMs > threshold,
+    };
+  });
 }
 
 function buildEventPairRows(
@@ -100,10 +122,7 @@ function buildEventPairRows(
 ): EventPairRow[] {
   const pairMap = new Map(pairs.map((p) => [p.preId, p]));
 
-  const matched = pairs.filter((p) => p.hasMatch);
-  const sortedDurations = [...matched.map((p) => p.durationMs)].sort((a, b) => a - b);
-  const median = sortedDurations[Math.floor(sortedDurations.length / 2)] ?? 1;
-  const outlierThreshold = median * 10;
+  const thresholds = perToolMedianThresholds(pairs);
 
   const rows: EventPairRow[] = [];
 
@@ -119,7 +138,12 @@ function buildEventPairRows(
       colorKey: colorKey(event),
       isTool: isPre,
       durationMs: pair?.durationMs ?? null,
-      isOutlier: isPre && pair?.hasMatch ? pair.durationMs > outlierThreshold : false,
+      isOutlier: (() => {
+        if (!isPre || !pair?.hasMatch) return false;
+        const key = event.toolName ?? "__none__";
+        const threshold = thresholds.get(key);
+        return threshold !== undefined && pair.durationMs > threshold;
+      })(),
       elapsedSec: Math.round(
         (new Date(event.timestamp).getTime() - sessionStart) / 1000,
       ),

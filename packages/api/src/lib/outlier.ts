@@ -70,11 +70,33 @@ export async function computeSessionOutlierStats(
     return { outlierCount: 0, outlierRatio: 0 };
   }
 
-  const sorted = [...pairs].sort((a, b) => a.durationMs - b.durationMs);
-  const medianMs = sorted[Math.floor(sorted.length / 2)]?.durationMs ?? 1;
-  const threshold = medianMs * 10;
+  // 툴 타입별 중앙값으로 비교 — Bash는 Bash끼리, Edit는 Edit끼리
+  // 같은 툴이 3개 미만이면 중앙값 신뢰도가 낮으므로 이상치 판정 스킵
+  const MIN_SAMPLES = 3;
+  const toolGroups = new Map<string, { toolName: string | null; durationMs: number }[]>();
+  for (const pair of pairs) {
+    const key = pair.toolName ?? "__none__";
+    if (!toolGroups.has(key)) toolGroups.set(key, []);
+    toolGroups.get(key)!.push(pair);
+  }
 
-  const outliers = pairs.filter((p) => p.durationMs > threshold);
+  const outliers: { toolName: string | null; durationMs: number; medianMs: number }[] = [];
+  let eligiblePairs = 0;
+
+  for (const group of toolGroups.values()) {
+    if (group.length < MIN_SAMPLES) continue;
+    eligiblePairs += group.length;
+
+    const sorted = [...group].sort((a, b) => a.durationMs - b.durationMs);
+    const medianMs = sorted[Math.floor(sorted.length / 2)]!.durationMs;
+    const threshold = medianMs * 10;
+
+    for (const pair of group) {
+      if (pair.durationMs > threshold) {
+        outliers.push({ ...pair, medianMs });
+      }
+    }
+  }
 
   // 멱등성: 기존 레코드 삭제 후 재삽입 (원자성 보장)
   await prisma.$transaction(async (tx) => {
@@ -86,7 +108,7 @@ export async function computeSessionOutlierStats(
           projectId,
           toolName: o.toolName ?? "unknown",
           durationMs: o.durationMs,
-          medianMs,
+          medianMs: o.medianMs,
         })),
       });
     }
@@ -94,6 +116,6 @@ export async function computeSessionOutlierStats(
 
   return {
     outlierCount: outliers.length,
-    outlierRatio: outliers.length / pairs.length,
+    outlierRatio: eligiblePairs > 0 ? outliers.length / eligiblePairs : 0,
   };
 }
