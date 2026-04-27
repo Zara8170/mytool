@@ -280,7 +280,7 @@ dashboardRoute.get("/:projectId/sessions/:sessionId", async (c) => {
     where: { id: sessionId, projectId },
     include: {
       user: { select: { name: true } },
-      _count: { select: { events: true } },
+      _count: { select: { events: true, messages: true } },
       usageRecords: {
         select: {
           model: true,
@@ -395,6 +395,7 @@ dashboardRoute.get("/:projectId/sessions/:sessionId", async (c) => {
         Math.round(u.estimatedCostUsd * 1_000_000) / 1_000_000,
     })),
     baselineComparison,
+    messageCount: session._count.messages,
   });
 });
 
