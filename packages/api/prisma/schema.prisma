@@ -67,18 +67,32 @@ model OrgMembership {
   @@map("org_memberships")
 }
 
+/// 토큰의 용도 — Web 세션은 7일, CLI 토큰은 1년 유효.
+/// 분리하는 이유: Web은 짧은 세션이 일반적이지만 CLI는 매번 로그인하기 번거로움.
+enum TokenKind {
+  WEB
+  CLI
+}
+
 model CliToken {
-  id        String    @id @default(cuid())
-  userId    String
-  // SHA-256(jwt) — 평문 토큰은 저장하지 않음
-  tokenHash String    @unique
-  revokedAt DateTime?
-  createdAt DateTime  @default(now())
-  expiresAt DateTime
+  id         String     @id @default(cuid())
+  userId     String
+  /// SHA-256(jwt) — 평문 토큰은 저장하지 않음
+  tokenHash  String     @unique
+  /// Web 세션 / CLI 토큰 구분
+  kind       TokenKind  @default(WEB)
+  /// 사용자 표시용 라벨 (e.g. "Chrome on Windows", "CLI on laptop")
+  label      String?
+  /// 토큰이 마지막으로 사용된 시각 (분 단위로 throttle, 정확하지 않을 수 있음)
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime   @default(now())
+  expiresAt  DateTime
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([userId, revokedAt])
   @@map("cli_tokens")
 }
 
@@ -110,6 +124,13 @@ model ClaudeSession {
   userId    String
   startedAt DateTime
   endedAt   DateTime?
+
+  // Stop 이벤트 수신 시 서버에서 집계
+  outlierCount    Int?    // 이상치 툴 호출 횟수
+  outlierRatio    Float?  // 이상치 비율 (0.0–1.0)
+  slowestToolName String? // 가장 느린 툴 이름
+  slowestToolMs   Int?    // 가장 느린 툴 소요시간 (ms)
+
   createdAt DateTime  @default(now())
 
   project      Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)

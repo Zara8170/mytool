@@ -4,15 +4,27 @@ import { calculateCost, IngestEventSchema } from "@mytool/shared";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { rateLimit, userKey } from "../middleware/rate-limit.js";
 import { forbidden, notFound } from "../lib/errors.js";
 import {
   parseEventDerivations,
   truncateToolPayload,
 } from "../lib/events.js";
+import { computeSessionOutlierStats } from "../lib/outlier.js";
 
 export const eventsRoute = new Hono();
 
+// 인증 통과 후 사용자별 분당 600회 제한 (=초당 10회).
+// 정상 hook 발화 빈도보다 훨씬 여유롭지만 폭주는 차단.
+const ingestLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 600,
+  bucket: "events",
+  key: userKey("events"),
+});
+
 eventsRoute.use("*", authMiddleware);
+eventsRoute.use("*", ingestLimiter);
 
 /**
  * POST /api/events
@@ -131,7 +143,28 @@ eventsRoute.post(
       }
     });
 
-    // 6. 즉시 응답 (CLI의 3초 타임아웃 보장)
+    // 6. Stop 이벤트면 이상치 통계를 비동기로 집계 (202 응답 지연 없이)
+    if (
+      event.hookEventName === "Stop" ||
+      event.hookEventName === "SubagentStop"
+    ) {
+      computeSessionOutlierStats(event.sessionId)
+        .then((stats) =>
+          prisma.claudeSession.update({
+            where: { id: event.sessionId },
+            data: {
+              outlierCount: stats.outlierCount,
+              outlierRatio: stats.outlierRatio,
+              slowestToolName: stats.slowestToolName,
+              slowestToolMs: stats.slowestToolMs,
+            },
+          }),
+        )
+        .catch(() => {
+          // 집계 실패는 무시 (이벤트 수신 자체는 성공)
+        });
+    }
+
     return c.json({ ok: true }, 202);
   },
 );
