@@ -1,4 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Claude Code transcript.jsonl 파일의 한 줄.
@@ -19,6 +21,84 @@ interface TranscriptLine {
   };
   content?: unknown;
   [key: string]: unknown;
+}
+
+const CONTENT_LIMIT = 50_000;
+
+export interface TranscriptMessage {
+  role: "human" | "assistant";
+  content: string;
+  timestamp: string;
+}
+
+/**
+ * 현재 작업 디렉토리와 sessionId로 transcript 파일을 찾아 메시지 배열을 반환한다.
+ * Claude Code는 ~/.claude/projects/{경로인코딩}/{sessionId}.jsonl 에 저장한다.
+ * Windows: C:\git\personal\mytool → C--git-personal-mytool
+ * Mac/Linux: /Users/foo/bar → -Users-foo-bar
+ */
+export function readTranscriptMessages(
+  sessionId: string,
+  cwd: string,
+): TranscriptMessage[] {
+  try {
+    const projectHash = cwd.replace(/[:/\\]/g, "-");
+    const transcriptPath = join(
+      homedir(),
+      ".claude",
+      "projects",
+      projectHash,
+      `${sessionId}.jsonl`,
+    );
+
+    const lines = readTranscriptLines(transcriptPath);
+    const messages: TranscriptMessage[] = [];
+
+    for (const entry of lines) {
+      if (entry.type !== "user" && entry.type !== "assistant") continue;
+
+      const role: "human" | "assistant" =
+        entry.type === "user" ? "human" : "assistant";
+      const msg = entry.message;
+      if (!msg) continue;
+
+      // thinking 블록은 스킵하고 text 블록만 추출
+      const content = extractTextContent(msg.content);
+      if (!content) continue;
+
+      const timestamp =
+        typeof entry.timestamp === "string"
+          ? (entry.timestamp as string)
+          : new Date().toISOString();
+
+      messages.push({
+        role,
+        content: content.slice(0, CONTENT_LIMIT),
+        timestamp,
+      });
+    }
+    return messages;
+  } catch {
+    return [];
+  }
+}
+
+function extractTextContent(content: unknown): string | null {
+  if (typeof content === "string") return content || null;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((c: unknown) => {
+        if (typeof c === "object" && c !== null) {
+          const obj = c as Record<string, unknown>;
+          if (obj.type === "text" && typeof obj.text === "string")
+            return obj.text;
+        }
+        return null;
+      })
+      .filter((s): s is string => s !== null && s.length > 0);
+    return parts.length > 0 ? parts.join("\n") : null;
+  }
+  return null;
 }
 
 export interface ExtractedUsage {
