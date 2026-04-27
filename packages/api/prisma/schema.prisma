@@ -1,0 +1,205 @@
+// mytool — Prisma schema
+//
+// 자체호스팅 PostgreSQL을 단일 DATABASE_URL로 사용합니다.
+// Supabase의 DIRECT_URL 분리는 사용하지 않습니다 (자체호스팅 단순화).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 인증 / 조직
+// ============================================================
+
+model User {
+  id           String          @id @default(cuid())
+  email        String          @unique
+  passwordHash String
+  name         String?
+  avatarUrl    String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  memberships  OrgMembership[]
+  tokens       CliToken[]
+  sessions     ClaudeSession[]
+  events       Event[]
+  usageRecords UsageRecord[]
+
+  @@map("users")
+}
+
+enum Role {
+  OWNER
+  MEMBER
+}
+
+model Organization {
+  id        String          @id @default(cuid())
+  name      String
+  slug      String          @unique
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  members  OrgMembership[]
+  projects Project[]
+
+  @@map("organizations")
+}
+
+model OrgMembership {
+  id        String       @id @default(cuid())
+  userId    String
+  orgId     String
+  role      Role         @default(MEMBER)
+  createdAt DateTime     @default(now())
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@index([orgId])
+  @@map("org_memberships")
+}
+
+model CliToken {
+  id        String    @id @default(cuid())
+  userId    String
+  // SHA-256(jwt) — 평문 토큰은 저장하지 않음
+  tokenHash String    @unique
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("cli_tokens")
+}
+
+// ============================================================
+// 프로젝트 / 세션 / 이벤트
+// ============================================================
+
+model Project {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  slug      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  org          Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  sessions     ClaudeSession[]
+  events       Event[]
+  usageRecords UsageRecord[]
+
+  @@unique([orgId, slug])
+  @@map("projects")
+}
+
+model ClaudeSession {
+  // Claude Code의 session_id를 그대로 사용
+  id        String    @id
+  projectId String
+  userId    String
+  startedAt DateTime
+  endedAt   DateTime?
+  createdAt DateTime  @default(now())
+
+  project      Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events       Event[]
+  usageRecords UsageRecord[]
+  messages     Message[]
+
+  @@index([projectId, startedAt])
+  @@index([userId])
+  @@map("claude_sessions")
+}
+
+model Event {
+  id              String    @id @default(cuid())
+  projectId       String
+  sessionId       String
+  userId          String
+
+  hookEventName   String    // "PreToolUse" | "PostToolUse" | "Stop" | ...
+  toolName        String?   // "Bash" | "Read" | "Skill" | "Agent" | ...
+  toolInput       String?   // JSON, 2000자 truncate
+  toolResponse    String?   // 2000자 truncate
+  exitCode        Int?
+
+  // 파생 필드 (서버에서 계산)
+  isSkillCall     Boolean   @default(false)
+  skillName       String?
+  isAgentCall     Boolean   @default(false)
+  agentType       String?
+  agentDesc       String?
+  isSlashCommand  Boolean   @default(false)
+  slashCommandName String?
+  agentId         String?
+
+  // 디버깅용 원본 페이로드
+  rawPayload      Json?
+
+  timestamp       DateTime
+  createdAt       DateTime  @default(now())
+
+  project Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  session ClaudeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, timestamp])
+  @@index([sessionId, timestamp])
+  @@index([skillName])
+  @@index([agentType])
+  @@map("events")
+}
+
+model UsageRecord {
+  id                       String   @id @default(cuid())
+  projectId                String
+  sessionId                String
+  userId                   String
+
+  model                    String
+  inputTokens              Int
+  outputTokens             Int
+  cacheCreationInputTokens Int      @default(0)
+  cacheReadInputTokens     Int      @default(0)
+  estimatedCostUsd         Decimal  @db.Decimal(12, 6)
+
+  isSubagent               Boolean  @default(false)
+  recordedAt               DateTime
+  createdAt                DateTime @default(now())
+
+  project Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  session ClaudeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, recordedAt])
+  @@index([userId, recordedAt])
+  @@map("usage_records")
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  sessionId String
+  role      String   // "human" | "assistant" | "tool"
+  content   String   // 50000자 truncate
+  orderIdx  Int      // 세션 내 순서
+  timestamp DateTime
+  createdAt DateTime @default(now())
+
+  session ClaudeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, orderIdx])
+  @@index([sessionId, orderIdx])
+  @@map("messages")
+}

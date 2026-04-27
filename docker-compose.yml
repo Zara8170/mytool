@@ -1,0 +1,63 @@
+# mytool 셀프호스팅 스택
+# 사용법:
+#   pnpm db:up              # DB만 띄우기 (개발용)
+#   docker compose up -d    # 전체 스택 띄우기 (프로덕션)
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mytool-postgres
+    environment:
+      POSTGRES_USER: mytool
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mytool}
+      POSTGRES_DB: mytool
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mytool"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    container_name: mytool-api
+    environment:
+      DATABASE_URL: postgresql://mytool:${POSTGRES_PASSWORD:-mytool}@postgres:5432/mytool
+      JWT_SECRET: ${JWT_SECRET}
+      WEB_URL: ${WEB_URL:-http://localhost:3000}
+      PORT: 3001
+      NODE_ENV: production
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - full
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+    container_name: mytool-web
+    environment:
+      API_URL: http://api:3001
+      NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3001}
+      AUTH_SECRET: ${AUTH_SECRET}
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+    profiles:
+      - full
+
+volumes:
+  postgres_data:

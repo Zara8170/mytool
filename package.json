@@ -1,0 +1,28 @@
+{
+  "name": "mytool",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Claude Code observability for individuals and small teams",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "clean": "turbo clean && rm -rf node_modules",
+    "db:up": "docker-compose up -d postgres",
+    "db:down": "docker-compose down",
+    "db:migrate": "pnpm --filter @mytool/api prisma migrate dev",
+    "db:studio": "pnpm --filter @mytool/api prisma studio"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.6.0",
+    "@types/node": "^20.0.0"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT"
+}

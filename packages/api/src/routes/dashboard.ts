@@ -1,0 +1,290 @@
+import { Hono } from "hono";
+import { zValidator } from "@hono/zod-validator";
+import { z } from "zod";
+import { prisma } from "../db.js";
+import { authMiddleware } from "../middleware/auth.js";
+import { forbidden, notFound } from "../lib/errors.js";
+
+export const dashboardRoute = new Hono();
+dashboardRoute.use("*", authMiddleware);
+
+const QuerySchema = z.object({
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  userId: z.string().optional(),
+});
+
+/**
+ * 프로젝트 권한 체크 + 날짜 범위 정규화 (기본 최근 30일).
+ */
+async function resolveDateRange(
+  projectId: string,
+  authUserId: string,
+  q: z.infer<typeof QuerySchema>,
+): Promise<{ from: Date; to: Date; userId?: string | undefined }> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { orgId: true },
+  });
+  if (!project) throw notFound("Project not found");
+  const membership = await prisma.orgMembership.findUnique({
+    where: { userId_orgId: { userId: authUserId, orgId: project.orgId } },
+  });
+  if (!membership) throw forbidden();
+
+  const to = q.to ? new Date(q.to) : new Date();
+  const from = q.from
+    ? new Date(q.from)
+    : new Date(to.getTime() - 30 * 24 * 60 * 60 * 1000);
+  return { from, to, userId: q.userId };
+}
+
+/**
+ * GET /api/projects/:projectId/dashboard/summary
+ */
+dashboardRoute.get(
+  "/:projectId/dashboard/summary",
+  zValidator("query", QuerySchema),
+  async (c) => {
+    const projectId = c.req.param("projectId");
+    const userId = c.get("userId");
+    const { from, to, userId: filterUserId } = await resolveDateRange(
+      projectId,
+      userId,
+      c.req.valid("query"),
+    );
+
+    const userFilter = filterUserId ? { userId: filterUserId } : {};
+
+    // Sessions count (시작 기준)
+    const totalSessions = await prisma.claudeSession.count({
+      where: {
+        projectId,
+        startedAt: { gte: from, lte: to },
+        ...userFilter,
+      },
+    });
+
+    // 활성 사용자 (해당 기간에 이벤트 발생시킨 distinct user)
+    const activeUsersAgg = await prisma.event.findMany({
+      where: { projectId, timestamp: { gte: from, lte: to }, ...userFilter },
+      distinct: ["userId"],
+      select: { userId: true },
+    });
+
+    // 토큰·비용 합산
+    const usageAgg = await prisma.usageRecord.aggregate({
+      where: { projectId, recordedAt: { gte: from, lte: to }, ...userFilter },
+      _sum: {
+        inputTokens: true,
+        outputTokens: true,
+        cacheReadInputTokens: true,
+        cacheCreationInputTokens: true,
+        estimatedCostUsd: true,
+      },
+    });
+
+    // Top skills
+    const topSkillsRaw = await prisma.event.groupBy({
+      by: ["skillName"],
+      where: {
+        projectId,
+        timestamp: { gte: from, lte: to },
+        isSkillCall: true,
+        skillName: { not: null },
+        ...userFilter,
+      },
+      _count: { _all: true },
+      orderBy: { _count: { skillName: "desc" } },
+      take: 10,
+    });
+
+    // Top agent types
+    const topAgentsRaw = await prisma.event.groupBy({
+      by: ["agentType"],
+      where: {
+        projectId,
+        timestamp: { gte: from, lte: to },
+        isAgentCall: true,
+        agentType: { not: null },
+        ...userFilter,
+      },
+      _count: { _all: true },
+      orderBy: { _count: { agentType: "desc" } },
+      take: 10,
+    });
+
+    return c.json({
+      totalSessions,
+      activeUsers: activeUsersAgg.length,
+      totalInputTokens: usageAgg._sum.inputTokens ?? 0,
+      totalOutputTokens: usageAgg._sum.outputTokens ?? 0,
+      totalCacheReadTokens: usageAgg._sum.cacheReadInputTokens ?? 0,
+      totalCacheCreationTokens: usageAgg._sum.cacheCreationInputTokens ?? 0,
+      estimatedCostUsd: Number(usageAgg._sum.estimatedCostUsd ?? 0),
+      topSkills: topSkillsRaw
+        .filter((r) => r.skillName)
+        .map((r) => ({ skillName: r.skillName!, callCount: r._count._all })),
+      topAgentTypes: topAgentsRaw
+        .filter((r) => r.agentType)
+        .map((r) => ({ agentType: r.agentType!, callCount: r._count._all })),
+    });
+  },
+);
+
+/**
+ * GET /api/projects/:projectId/dashboard/usage
+ * 일별 토큰·비용 시계열.
+ *
+ * Postgres의 date_trunc 대신, JS에서 일별 버킷팅합니다.
+ * 일별 사용 레코드 수가 많지 않으므로 (수백~수천) 충분히 빠르고,
+ * Prisma의 type-safety를 유지할 수 있습니다.
+ */
+dashboardRoute.get(
+  "/:projectId/dashboard/usage",
+  zValidator("query", QuerySchema),
+  async (c) => {
+    const projectId = c.req.param("projectId");
+    const userId = c.get("userId");
+    const { from, to, userId: filterUserId } = await resolveDateRange(
+      projectId,
+      userId,
+      c.req.valid("query"),
+    );
+
+    const records = await prisma.usageRecord.findMany({
+      where: {
+        projectId,
+        recordedAt: { gte: from, lte: to },
+        ...(filterUserId ? { userId: filterUserId } : {}),
+      },
+      select: {
+        recordedAt: true,
+        inputTokens: true,
+        outputTokens: true,
+        cacheReadInputTokens: true,
+        cacheCreationInputTokens: true,
+        estimatedCostUsd: true,
+      },
+      orderBy: { recordedAt: "asc" },
+    });
+
+    // 일별 버킷
+    const buckets = new Map<
+      string,
+      {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheCreationTokens: number;
+        estimatedCostUsd: number;
+      }
+    >();
+
+    for (const r of records) {
+      const dateKey = r.recordedAt.toISOString().slice(0, 10);
+      const bucket = buckets.get(dateKey) ?? {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        estimatedCostUsd: 0,
+      };
+      bucket.inputTokens += r.inputTokens;
+      bucket.outputTokens += r.outputTokens;
+      bucket.cacheReadTokens += r.cacheReadInputTokens;
+      bucket.cacheCreationTokens += r.cacheCreationInputTokens;
+      bucket.estimatedCostUsd += Number(r.estimatedCostUsd);
+      buckets.set(dateKey, bucket);
+    }
+
+    const series = Array.from(buckets.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, b]) => ({
+        date,
+        inputTokens: b.inputTokens,
+        outputTokens: b.outputTokens,
+        cacheReadTokens: b.cacheReadTokens,
+        cacheCreationTokens: b.cacheCreationTokens,
+        estimatedCostUsd: Math.round(b.estimatedCostUsd * 1_000_000) / 1_000_000,
+      }));
+
+    return c.json({ series });
+  },
+);
+
+/**
+ * GET /api/projects/:projectId/dashboard/sessions
+ */
+dashboardRoute.get(
+  "/:projectId/dashboard/sessions",
+  zValidator(
+    "query",
+    QuerySchema.extend({
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+      offset: z.coerce.number().int().min(0).default(0),
+    }),
+  ),
+  async (c) => {
+    const projectId = c.req.param("projectId");
+    const userId = c.get("userId");
+    const q = c.req.valid("query");
+    const { from, to, userId: filterUserId } = await resolveDateRange(
+      projectId,
+      userId,
+      q,
+    );
+
+    const where = {
+      projectId,
+      startedAt: { gte: from, lte: to },
+      ...(filterUserId ? { userId: filterUserId } : {}),
+    };
+
+    const [total, sessions] = await Promise.all([
+      prisma.claudeSession.count({ where }),
+      prisma.claudeSession.findMany({
+        where,
+        orderBy: { startedAt: "desc" },
+        take: q.limit,
+        skip: q.offset,
+        include: {
+          user: { select: { name: true } },
+          _count: { select: { events: true } },
+          usageRecords: {
+            select: {
+              inputTokens: true,
+              outputTokens: true,
+              estimatedCostUsd: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    return c.json({
+      total,
+      sessions: sessions.map((s) => {
+        const tokens = s.usageRecords.reduce(
+          (acc, u) => ({
+            inputTokens: acc.inputTokens + u.inputTokens,
+            outputTokens: acc.outputTokens + u.outputTokens,
+            cost: acc.cost + Number(u.estimatedCostUsd),
+          }),
+          { inputTokens: 0, outputTokens: 0, cost: 0 },
+        );
+        return {
+          id: s.id,
+          userId: s.userId,
+          userName: s.user.name,
+          startedAt: s.startedAt.toISOString(),
+          endedAt: s.endedAt?.toISOString() ?? null,
+          eventCount: s._count.events,
+          inputTokens: tokens.inputTokens,
+          outputTokens: tokens.outputTokens,
+          estimatedCostUsd: tokens.cost,
+        };
+      }),
+    });
+  },
+);
