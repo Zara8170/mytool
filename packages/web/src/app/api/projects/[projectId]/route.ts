@@ -7,6 +7,31 @@ interface RouteContext {
   params: Promise<{ projectId: string }>;
 }
 
+export async function DELETE(req: Request, context: RouteContext): Promise<NextResponse> {
+  try {
+    const { userId } = await requireAuth(req);
+    const { projectId } = await context.params;
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { id: true, orgId: true },
+    });
+    if (!project) throw notFound("Project not found");
+
+    const membership = await prisma.orgMembership.findUnique({
+      where: { userId_orgId: { userId, orgId: project.orgId } },
+    });
+    if (!membership) throw forbidden("Not a member of this project's organization");
+    if (membership.role !== "OWNER") throw forbidden("Only owners can delete projects");
+
+    await prisma.project.delete({ where: { id: projectId } });
+
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    return handleRouteError(err);
+  }
+}
+
 export async function GET(req: Request, context: RouteContext): Promise<NextResponse> {
   try {
     const { userId } = await requireAuth(req);
