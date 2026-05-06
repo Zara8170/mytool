@@ -1,6 +1,5 @@
 import Link from "next/link";
-import { serverFetch } from "@/lib/server-api";
-import type { SessionDetail, EventList, EventItem } from "@mytool/shared";
+import { getRequiredUserId, getSessionDetail, getSessionEvents } from "@/lib/server-queries";
 import { ActivityRibbon, type RibbonSegment } from "@/components/activity-ribbon";
 import { MergedEventList, type EventPairRow } from "@/components/merged-event-list";
 
@@ -13,6 +12,23 @@ interface PageProps {
 // ─────────────────────────────────────────────────────────
 
 type ColorKey = RibbonSegment["colorKey"];
+
+type EventItem = {
+  id: string;
+  hookEventName: string;
+  toolName: string | null;
+  toolInput: string | null;
+  toolResponse: string | null;
+  exitCode: number | null;
+  isSkillCall: boolean;
+  skillName: string | null;
+  isAgentCall: boolean;
+  agentType: string | null;
+  agentDesc: string | null;
+  isSlashCommand: boolean;
+  slashCommandName: string | null;
+  timestamp: string;
+};
 
 function colorKey(event: EventItem): ColorKey {
   if (event.isAgentCall) return "agent";
@@ -168,14 +184,11 @@ function buildEventPairRows(
 
 export default async function SessionDetailPage({ params }: PageProps) {
   const { projectId, sessionId } = await params;
+  const userId = await getRequiredUserId();
 
   const [session, eventData] = await Promise.all([
-    serverFetch<SessionDetail>(
-      `/api/projects/${projectId}/sessions/${sessionId}`,
-    ),
-    serverFetch<EventList>(
-      `/api/projects/${projectId}/sessions/${sessionId}/events?limit=500`,
-    ),
+    getSessionDetail(projectId, sessionId, userId),
+    getSessionEvents(projectId, sessionId, userId, 500),
   ]);
 
   const sessionStart = new Date(session.startedAt).getTime();

@@ -1,5 +1,4 @@
-import { serverFetch } from "@/lib/server-api";
-import type { DashboardSummary } from "@mytool/shared";
+import { getRequiredUserId, getDashboardSummary } from "@/lib/server-queries";
 
 interface PageProps {
   params: Promise<{ projectId: string }>;
@@ -7,9 +6,8 @@ interface PageProps {
 
 export default async function SkillsPage({ params }: PageProps) {
   const { projectId } = await params;
-  const summary = await serverFetch<DashboardSummary>(
-    `/api/projects/${projectId}/dashboard/summary`,
-  );
+  const userId = await getRequiredUserId();
+  const summary = await getDashboardSummary(projectId, userId);
 
   return (
     <div className="space-y-6">

@@ -1,6 +1,5 @@
 import Link from "next/link";
-import { serverFetch } from "@/lib/server-api";
-import type { SessionList } from "@mytool/shared";
+import { getRequiredUserId, getSessionList } from "@/lib/server-queries";
 
 interface PageProps {
   params: Promise<{ projectId: string }>;
@@ -8,9 +7,8 @@ interface PageProps {
 
 export default async function SessionsPage({ params }: PageProps) {
   const { projectId } = await params;
-  const data = await serverFetch<SessionList>(
-    `/api/projects/${projectId}/dashboard/sessions?limit=50`,
-  );
+  const userId = await getRequiredUserId();
+  const data = await getSessionList(projectId, userId, 50);
 
   return (
     <div className="space-y-6">

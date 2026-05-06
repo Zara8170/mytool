@@ -1,18 +1,13 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
-import { getAuthToken } from "@/lib/auth";
-import { serverFetch } from "@/lib/server-api";
-import type { SessionListResponse } from "@mytool/shared";
+import { getRequiredAuth, getUserTokens } from "@/lib/server-queries";
 import { RevokeButton } from "@/components/revoke-button";
 
 export default async function SessionsPage() {
-  const token = await getAuthToken();
-  if (!token) redirect("/login");
+  const { userId, tokenHash } = await getRequiredAuth();
+  const sessions = await getUserTokens(userId, tokenHash);
 
-  const data = await serverFetch<SessionListResponse>("/api/auth/sessions");
-
-  const active = data.sessions.filter((s) => s.isActive);
-  const inactive = data.sessions.filter((s) => !s.isActive);
+  const active = sessions.filter((s) => s.isActive);
+  const inactive = sessions.filter((s) => !s.isActive);
 
   return (
     <main className="max-w-2xl mx-auto p-8 space-y-6">

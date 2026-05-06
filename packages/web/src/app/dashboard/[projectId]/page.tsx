@@ -1,5 +1,4 @@
-import { serverFetch } from "@/lib/server-api";
-import type { DashboardSummary, UsageSeries } from "@mytool/shared";
+import { getRequiredUserId, getDashboardSummary, getUsageSeries } from "@/lib/server-queries";
 import { TokenUsageChart } from "@/components/token-usage-chart";
 
 interface PageProps {
@@ -8,12 +7,11 @@ interface PageProps {
 
 export default async function OverviewPage({ params }: PageProps) {
   const { projectId } = await params;
+  const userId = await getRequiredUserId();
 
   const [summary, usage] = await Promise.all([
-    serverFetch<DashboardSummary>(
-      `/api/projects/${projectId}/dashboard/summary`,
-    ),
-    serverFetch<UsageSeries>(`/api/projects/${projectId}/dashboard/usage`),
+    getDashboardSummary(projectId, userId),
+    getUsageSeries(projectId, userId),
   ]);
 
   return (

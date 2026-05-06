@@ -1,18 +1,5 @@
 import Link from "next/link";
-import { serverFetch } from "@/lib/server-api";
-
-interface Message {
-  id: string;
-  role: "human" | "assistant";
-  content: string;
-  orderIdx: number;
-  timestamp: string;
-}
-
-interface MessageListResponse {
-  messages: Message[];
-  total: number;
-}
+import { getSessionMessages } from "@/lib/server-queries";
 
 interface PageProps {
   params: Promise<{ projectId: string; sessionId: string }>;
@@ -21,9 +8,7 @@ interface PageProps {
 export default async function TranscriptPage({ params }: PageProps) {
   const { projectId, sessionId } = await params;
 
-  const data = await serverFetch<MessageListResponse>(
-    `/api/projects/${projectId}/sessions/${sessionId}/messages`,
-  );
+  const data = await getSessionMessages(sessionId);
 
   return (
     <div className="space-y-6">
