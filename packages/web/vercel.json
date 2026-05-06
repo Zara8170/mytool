@@ -1,0 +1,3 @@
+{
+  "buildCommand": "cd ../.. && pnpm --filter @mytool/shared build && pnpm --filter @mytool/web build"
+}
