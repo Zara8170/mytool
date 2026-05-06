@@ -4,6 +4,7 @@ import { getAuthToken } from "@/lib/auth";
 import { verifyJwt } from "@/lib/jwt";
 import { prisma } from "@/lib/db";
 import { LogoutButton } from "@/components/logout-button";
+import { DeleteProjectButton } from "@/components/delete-project-button";
 
 export default async function SettingsPage() {
   const token = await getAuthToken();
