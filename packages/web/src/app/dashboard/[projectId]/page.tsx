@@ -1,4 +1,4 @@
-import { getRequiredUserId, getDashboardSummary, getUsageSeries } from "@/lib/server-queries";
+import { getRequiredUserId, getDashboardSummary, getUsageSeries, getForgottenSkills } from "@/lib/server-queries";
 import { TokenUsageChart } from "@/components/token-usage-chart";
 
 interface PageProps {
@@ -9,9 +9,10 @@ export default async function OverviewPage({ params }: PageProps) {
   const { projectId } = await params;
   const userId = await getRequiredUserId();
 
-  const [summary, usage] = await Promise.all([
+  const [summary, usage, forgottenSkills] = await Promise.all([
     getDashboardSummary(projectId, userId),
     getUsageSeries(projectId, userId),
+    getForgottenSkills(projectId, userId, userId),
   ]);
 
   return (
@@ -68,6 +69,27 @@ export default async function OverviewPage({ params }: PageProps) {
           empty="No agent calls yet."
         />
       </section>
+
+      {forgottenSkills.length > 0 && (
+        <section>
+          <h2 className="text-lg font-semibold mb-1">최근 1주일 동안 쓰지 않은 스킬</h2>
+          <p className="text-xs text-muted mb-3">
+            지난 4주 동안 사용했지만 최근 7일 동안 사용하지 않은 스킬입니다.
+          </p>
+          <div className="bg-panel border rounded-lg p-4">
+            <ul className="space-y-1.5">
+              {forgottenSkills.map((s) => (
+                <li key={s.skillName} className="flex justify-between text-sm border-b last:border-b-0 pb-1.5 last:pb-0">
+                  <span className="font-mono">{s.skillName}</span>
+                  <span className="text-muted text-xs">
+                    마지막 사용: {new Date(s.lastUsedAt).toLocaleDateString()}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
 
     </div>
   );
