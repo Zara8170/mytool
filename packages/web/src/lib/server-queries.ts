@@ -240,7 +240,6 @@ export async function getSessionDetail(projectId: string, sessionId: string, use
     inputTokens: totals.inputTokens, outputTokens: totals.outputTokens,
     cacheReadInputTokens: totals.cacheReadInputTokens, cacheCreationInputTokens: totals.cacheCreationInputTokens,
     estimatedCostUsd: totals.cost,
-    outlierCount: session.outlierCount, outlierRatio: session.outlierRatio,
     usageByModel: Array.from(modelMap.entries()).map(([model, u]) => ({
       model, ...u, estimatedCostUsd: Math.round(u.estimatedCostUsd * 1_000_000) / 1_000_000,
     })),
