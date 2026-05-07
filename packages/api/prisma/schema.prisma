@@ -128,13 +128,8 @@ model ClaudeSession {
   startedAt DateTime
   endedAt   DateTime?
 
-  // Stop 이벤트 수신 시 서버에서 집계
-  outlierCount    Int?    // 이상치 툴 호출 횟수
-  outlierRatio    Float?  // 이상치 비율 (0.0–1.0)
-
   createdAt DateTime  @default(now())
 
-  outlierEvents SessionOutlierEvent[]
   project      Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   events       Event[]
