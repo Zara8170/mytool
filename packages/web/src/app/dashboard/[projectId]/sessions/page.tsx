@@ -34,7 +34,6 @@ export default async function SessionsPage({ params }: PageProps) {
                 <th className="text-right px-4 py-2">Events</th>
                 <th className="text-right px-4 py-2">Tokens</th>
                 <th className="text-right px-4 py-2">Cost</th>
-                <th className="text-right px-4 py-2">Outliers</th>
                 <th className="text-left px-4 py-2">Session ID</th>
               </tr>
             </thead>
@@ -61,15 +60,6 @@ export default async function SessionsPage({ params }: PageProps) {
                   </td>
                   <td className="px-4 py-2 text-right tabular-nums">
                     ${s.estimatedCostUsd.toFixed(4)}
-                  </td>
-                  <td className="px-4 py-2 text-right tabular-nums">
-                    {s.outlierCount == null ? (
-                      <span className="text-muted">—</span>
-                    ) : s.outlierCount === 0 ? (
-                      <span className="text-muted">0</span>
-                    ) : (
-                      <span className="text-red-400">{s.outlierCount}</span>
-                    )}
                   </td>
                   <td className="px-4 py-2 font-mono text-xs text-muted">
                     {s.id.slice(0, 12)}…

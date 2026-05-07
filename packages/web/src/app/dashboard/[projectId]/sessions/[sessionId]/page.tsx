@@ -268,28 +268,6 @@ export default async function SessionDetailPage({ params }: PageProps) {
         />
       </section>
 
-      {/* 프로젝트 기준 대비 느린 툴 */}
-      {session.baselineComparison && session.baselineComparison.length > 0 && (
-        <section className="bg-amber-950/20 border border-amber-900/40 rounded-lg p-4">
-          <h2 className="text-sm font-semibold text-amber-400 mb-2">
-            ⚠ 프로젝트 기준 대비 느린 툴
-          </h2>
-          <ul className="space-y-1">
-            {session.baselineComparison.map((b) => (
-              <li key={b.toolName} className="text-sm flex justify-between">
-                <span className="font-mono">{b.toolName}</span>
-                <span className="text-amber-400">
-                  {b.ratio}x 느림
-                  <span className="text-muted ml-2 text-xs">
-                    ({formatMs(b.sessionMedianMs)} vs 기준 {formatMs(b.projectP50Ms)})
-                  </span>
-                </span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
       {/* 토큰 breakdown 바 */}
       <section className="bg-panel border rounded-lg p-5 space-y-3">
         <h2 className="text-sm font-semibold">토큰 사용 분포</h2>
