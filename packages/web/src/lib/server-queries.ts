@@ -145,12 +145,29 @@ export async function getUsageSeries(projectId: string, userId: string) {
     orderBy: { date: "asc" },
   });
 
-  const todayEnd = new Date(today);
-  todayEnd.setUTCDate(todayEnd.getUTCDate() + 1);
-  const todayUsage = await prisma.usageRecord.aggregate({
-    where: { projectId, recordedAt: { gte: today, lt: todayEnd } },
-    _sum: { inputTokens: true, outputTokens: true, cacheReadInputTokens: true, cacheCreationInputTokens: true, estimatedCostUsd: true },
-  });
+  // Today's aggregate — cached for 30 seconds to avoid repeated DB hits on dashboard refresh
+  const cacheKey = projectId;
+  const cachedToday = todayUsageCache.get(cacheKey);
+  let todayData: TodayUsageData;
+
+  if (cachedToday && cachedToday.expiresAt > Date.now()) {
+    todayData = cachedToday.data;
+  } else {
+    const todayEnd = new Date(today);
+    todayEnd.setUTCDate(todayEnd.getUTCDate() + 1);
+    const todayUsage = await prisma.usageRecord.aggregate({
+      where: { projectId, recordedAt: { gte: today, lt: todayEnd } },
+      _sum: { inputTokens: true, outputTokens: true, cacheReadInputTokens: true, cacheCreationInputTokens: true, estimatedCostUsd: true },
+    });
+    todayData = {
+      inputTokens: todayUsage._sum.inputTokens ?? 0,
+      outputTokens: todayUsage._sum.outputTokens ?? 0,
+      cacheReadTokens: todayUsage._sum.cacheReadInputTokens ?? 0,
+      cacheCreationTokens: todayUsage._sum.cacheCreationInputTokens ?? 0,
+      estimatedCostUsd: Math.round(Number(todayUsage._sum.estimatedCostUsd ?? 0) * 1_000_000) / 1_000_000,
+    };
+    todayUsageCache.set(cacheKey, { data: todayData, expiresAt: Date.now() + TODAY_CACHE_TTL_MS });
+  }
 
   return {
     series: [
@@ -164,11 +181,11 @@ export async function getUsageSeries(projectId: string, userId: string) {
       })),
       {
         date: today.toISOString().slice(0, 10),
-        inputTokens: todayUsage._sum.inputTokens ?? 0,
-        outputTokens: todayUsage._sum.outputTokens ?? 0,
-        cacheReadTokens: todayUsage._sum.cacheReadInputTokens ?? 0,
-        cacheCreationTokens: todayUsage._sum.cacheCreationInputTokens ?? 0,
-        estimatedCostUsd: Math.round(Number(todayUsage._sum.estimatedCostUsd ?? 0) * 1_000_000) / 1_000_000,
+        inputTokens: todayData.inputTokens,
+        outputTokens: todayData.outputTokens,
+        cacheReadTokens: todayData.cacheReadTokens,
+        cacheCreationTokens: todayData.cacheCreationTokens,
+        estimatedCostUsd: todayData.estimatedCostUsd,
       },
     ],
   };
