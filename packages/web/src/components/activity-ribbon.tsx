@@ -94,10 +94,6 @@ export function ActivityRibbon({ segments }: Props) {
             <span>{label}</span>
           </div>
         ))}
-        <div className="flex items-center gap-1.5">
-          <div className="w-2 h-2 rounded-full bg-red-400" />
-          <span>이상치 (중앙값 × 10)</span>
-        </div>
       </div>
     </div>
   );
