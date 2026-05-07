@@ -143,29 +143,11 @@ eventsRoute.post(
       }
     });
 
-    // 6. Stop 이벤트면 이상치 통계를 비동기로 집계 (202 응답 지연 없이)
+    // 6. Stop 이벤트면 일별 통계를 비동기로 집계 (202 응답 지연 없이)
     if (
       event.hookEventName === "Stop" ||
       event.hookEventName === "SubagentStop"
     ) {
-      computeSessionOutlierStats(event.sessionId, event.projectId)
-        .then((stats) =>
-          prisma.claudeSession.update({
-            where: { id: event.sessionId },
-            data: {
-              outlierCount: stats.outlierCount,
-              outlierRatio: stats.outlierRatio,
-            },
-          }),
-        )
-        .catch((err) => {
-          console.warn("[outlier] aggregation failed", { sessionId: event.sessionId, err });
-        });
-
-      updateProjectToolBaselines(event.projectId).catch((err) => {
-        console.warn("[baseline] update failed", { projectId: event.projectId, err });
-      });
-
       upsertDailyProjectStats(event.projectId, new Date(event.timestamp)).catch((err) => {
         console.warn("[daily-stats] update failed", { projectId: event.projectId, err });
       });
