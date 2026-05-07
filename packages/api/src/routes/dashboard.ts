@@ -474,8 +474,6 @@ dashboardRoute.get(
           inputTokens: tokens.inputTokens,
           outputTokens: tokens.outputTokens,
           estimatedCostUsd: tokens.cost,
-          outlierCount: s.outlierCount,
-          outlierRatio: s.outlierRatio,
         };
       }),
     });
