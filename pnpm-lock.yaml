@@ -75,6 +75,9 @@ importers:
       '@inquirer/prompts':
         specifier: ^7.2.0
         version: 7.10.1(@types/node@20.19.39)
+      '@mytool/shared':
+        specifier: workspace:*
+        version: link:../shared
       chalk:
         specifier: ^5.4.0
         version: 5.6.2
@@ -84,6 +87,9 @@ importers:
       ora:
         specifier: ^8.1.0
         version: 8.2.0
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^20.0.0
