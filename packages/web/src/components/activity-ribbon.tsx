@@ -57,9 +57,6 @@ export function ActivityRibbon({ segments }: Props) {
             onMouseLeave={() => setHoveredId(null)}
             onClick={() => handleClick(seg.id)}
           >
-            {seg.isOutlier && (
-              <div className="absolute top-1 right-0.5 w-1.5 h-1.5 rounded-full bg-red-400 ring-1 ring-black/40" />
-            )}
           </div>
         ))}
       </div>
