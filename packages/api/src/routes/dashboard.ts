@@ -524,6 +524,80 @@ dashboardRoute.post(
 );
 
 /**
+ * GET /api/projects/:projectId/dashboard/forgotten-skills
+ *
+ * 쿼리 파라미터:
+ *   userId (required): 조회할 사용자 ID
+ *
+ * 과거 28일 동안 사용한 스킬 중 최근 7일에 사용하지 않은 스킬 목록을 반환한다.
+ */
+dashboardRoute.get(
+  "/:projectId/dashboard/forgotten-skills",
+  zValidator("query", z.object({ userId: z.string() })),
+  async (c) => {
+    const projectId = c.req.param("projectId");
+    const authUserId = c.get("userId");
+    const { userId: targetUserId } = c.req.valid("query");
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { orgId: true },
+    });
+    if (!project) throw notFound("Project not found");
+    const membership = await prisma.orgMembership.findUnique({
+      where: { userId_orgId: { userId: authUserId, orgId: project.orgId } },
+    });
+    if (!membership) throw forbidden();
+
+    const now = new Date();
+    const fourWeeksAgo = new Date(now.getTime() - 28 * 24 * 60 * 60 * 1000);
+    const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+    const [pastSkillsRaw, recentSkillsRaw] = await Promise.all([
+      prisma.event.findMany({
+        where: {
+          projectId,
+          userId: targetUserId,
+          isSkillCall: true,
+          skillName: { not: null },
+          timestamp: { gte: fourWeeksAgo },
+        },
+        select: { skillName: true, timestamp: true },
+        orderBy: { timestamp: "desc" },
+      }),
+      prisma.event.findMany({
+        where: {
+          projectId,
+          userId: targetUserId,
+          isSkillCall: true,
+          skillName: { not: null },
+          timestamp: { gte: oneWeekAgo },
+        },
+        select: { skillName: true },
+        distinct: ["skillName"],
+      }),
+    ]);
+
+    const recentSkills = new Set(recentSkillsRaw.map((e) => e.skillName!));
+
+    // 과거 4주 중 최근 사용일 계산 (이미 desc 정렬됨)
+    const lastUsedMap = new Map<string, string>();
+    for (const e of pastSkillsRaw) {
+      if (!lastUsedMap.has(e.skillName!)) {
+        lastUsedMap.set(e.skillName!, e.timestamp.toISOString());
+      }
+    }
+
+    const forgottenSkills = [...lastUsedMap.entries()]
+      .filter(([skillName]) => !recentSkills.has(skillName))
+      .map(([skillName, lastUsedAt]) => ({ skillName, lastUsedAt }))
+      .sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt));
+
+    return c.json({ forgottenSkills });
+  },
+);
+
+/**
  * GET /api/projects/:projectId/sessions/:sessionId/messages
  * 세션 대화 내역 조회
  */
