@@ -69,7 +69,6 @@ export function ActivityRibbon({ segments }: Props) {
               {hovered.label}
             </span>
             <span className="text-muted">{formatMs(hovered.durationMs)}</span>
-            {hovered.isOutlier && <span className="text-red-400">⚠ 이상치</span>}
           </span>
         ) : (
           <span className="text-xs text-muted px-1">
