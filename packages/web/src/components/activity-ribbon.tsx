@@ -7,7 +7,6 @@ export type RibbonSegment = {
   label: string;
   colorKey: "read" | "bash" | "edit" | "skill" | "agent" | "other";
   durationMs: number;
-  isOutlier: boolean;
 };
 
 const SEG_BG: Record<RibbonSegment["colorKey"], string> = {

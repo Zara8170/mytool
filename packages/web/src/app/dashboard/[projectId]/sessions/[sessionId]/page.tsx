@@ -61,8 +61,6 @@ type PairedResult = {
   postResponse: string | null;
 };
 
-const OUTLIER_EXCLUDED_TOOLS = new Set(["Agent"]);
-
 function pairEvents(events: EventItem[]): PairedResult[] {
   const postBuckets = new Map<string, EventItem[]>();
   for (const e of events.filter((e) => e.hookEventName === "PostToolUse")) {
@@ -74,7 +72,6 @@ function pairEvents(events: EventItem[]): PairedResult[] {
   const results: PairedResult[] = [];
 
   for (const pre of events.filter((e) => e.hookEventName === "PreToolUse")) {
-    const excluded = OUTLIER_EXCLUDED_TOOLS.has(pre.toolName ?? "");
     const bucket = postBuckets.get(pre.toolName ?? "__none__") ?? [];
     const match = bucket.find(
       (p) =>
@@ -89,46 +86,21 @@ function pairEvents(events: EventItem[]): PairedResult[] {
       preId: pre.id,
       pre,
       durationMs,
-      hasMatch: match !== undefined && !excluded,
+      hasMatch: match !== undefined,
       postResponse: match?.toolResponse ?? null,
     });
   }
   return results;
 }
 
-const MIN_SAMPLES_FOR_OUTLIER = 3;
-
-function perToolMedianThresholds(pairs: PairedResult[]): Map<string, number> {
-  const groups = new Map<string, number[]>();
-  for (const p of pairs) {
-    if (!p.hasMatch) continue;
-    const key = p.pre.toolName ?? "__none__";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(p.durationMs);
-  }
-  const thresholds = new Map<string, number>();
-  for (const [key, durations] of groups) {
-    if (durations.length < MIN_SAMPLES_FOR_OUTLIER) continue;
-    const sorted = [...durations].sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)]!;
-    thresholds.set(key, median * 10);
-  }
-  return thresholds;
-}
-
 function buildRibbonSegments(pairs: PairedResult[]): RibbonSegment[] {
-  const thresholds = perToolMedianThresholds(pairs);
-  return pairs.map((p) => {
-    const key = p.pre.toolName ?? "__none__";
-    const threshold = thresholds.get(key);
-    return {
-      id: p.preId,
-      label: toolLabel(p.pre),
-      colorKey: colorKey(p.pre),
-      durationMs: p.durationMs,
-      isOutlier: p.hasMatch && threshold !== undefined && p.durationMs > threshold,
-    };
-  });
+  return pairs.map((p) => ({
+    id: p.preId,
+    label: toolLabel(p.pre),
+    colorKey: colorKey(p.pre),
+    durationMs: p.durationMs,
+    isOutlier: false,
+  }));
 }
 
 function buildEventPairRows(
@@ -137,8 +109,6 @@ function buildEventPairRows(
   sessionStart: number,
 ): EventPairRow[] {
   const pairMap = new Map(pairs.map((p) => [p.preId, p]));
-
-  const thresholds = perToolMedianThresholds(pairs);
 
   const rows: EventPairRow[] = [];
 
@@ -154,12 +124,7 @@ function buildEventPairRows(
       colorKey: colorKey(event),
       isTool: isPre,
       durationMs: pair?.durationMs ?? null,
-      isOutlier: (() => {
-        if (!isPre || !pair?.hasMatch) return false;
-        const key = event.toolName ?? "__none__";
-        const threshold = thresholds.get(key);
-        return threshold !== undefined && pair.durationMs > threshold;
-      })(),
+      isOutlier: false,
       elapsedSec: Math.round(
         (new Date(event.timestamp).getTime() - sessionStart) / 1000,
       ),
