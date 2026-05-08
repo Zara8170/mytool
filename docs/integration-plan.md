@@ -383,22 +383,73 @@ model HarnessEvent {
 
 ## 6. API 라우트
 
-### 6.1 sync 관련
+### 6.1 sync 관련 — push/pull 모델 (B 안, 2026-05-07 결정)
+
+**핵심 결정**: 셀프호스팅·SaaS 양쪽을 모두 지원하기 위해 **api 는 절대 사용자 PC 의 fs 에 직접 접근하지 않는다**. cli 가 스캔·번들·적용을 담당하고, api 는 메타데이터·번들 저장소·작업 큐 역할만.
+
+#### 흐름
+
+```
+PC-A (소스)                     mytool API (Vercel)              PC-B (대상)
+  │                                    │                              │
+  │ 1) mytool sync push                │                              │
+  │   ├── @mytool/sync 로 스캔         │                              │
+  │   └── snapshot + bundle 업로드 ───►│                              │
+  │                                    │ DB 에 SyncSnapshot 저장      │
+  │                                    │ Storage 에 bundle 저장       │
+  │                                                                   │
+  │                              ◄─── 사용자가 web 에서 ─────────────┐│
+  │                              │  /settings/sync 에서 소스/대상/   ││
+  │                              │  항목 선택 → "복사 실행"           ││
+  │                              │  → SyncJob 생성 (대상 PC 별 1개)  ││
+  │                                                                   │
+  │                                    │ 2) mytool sync pull          │
+  │                                    │   (또는 daemon 의 큐 이벤트)│
+  │                                    │◄─── job 폴링 ────────────────┤
+  │                                    │     bundle 다운로드 응답 ────►│
+  │                                                                   │
+  │                                                          @mytool/sync 로 적용
+  │                                                          (bak 백업 / 충돌 처리)
+  │                                                                   │
+  │                                                          job 결과 보고 ───►│ DB
+```
+
+PR 11 의 daemon 이 들어오면 폴링 대신 WebSocket push 로 바뀌어 즉시 반영. PR 3 시점에서는 **명시 명령 (`mytool sync pull`) 으로 폴링**.
+
+#### 라우트
 
 | Method | Path | 설명 |
 | --- | --- | --- |
-| GET | `/api/sync/scan?source=local` | 로컬 머신에서 스캔한 결과를 cli 가 업로드 (POST 가 더 적절 — 아래 참고) |
-| POST | `/api/sync/snapshots` | cli 가 스캔 결과 업로드. `{ items, source }` |
-| GET | `/api/sync/snapshots/latest` | 가장 최근 스냅샷 반환 |
-| POST | `/api/sync/copy` | `{ items: SyncItem[], targetProjectIds: string[], options: { mask, overwrite } }`. mytool 자체 파일시스템 접근 권한이 있는 환경에서만 동작. 또는 web 이 cli 에게 명령을 큐로 전달. |
-| POST | `/api/sync/export` | zip 다운로드 (스냅샷에서 골라 묶음) |
+| POST | `/api/sync/snapshots` | cli (`sync push`) 가 스캔 결과 메타 업로드. body: `{ source: { hostname, platform, deviceId }, items: SyncItem[] }`. response: `{ snapshotId, uploadUrl? }` |
+| POST | `/api/sync/snapshots/:id/bundle` | cli 가 bundle 본체 (zip) 업로드. multipart 또는 presigned URL. mask 적용 여부는 manifest 에 기록. |
+| GET | `/api/sync/snapshots` | 사용자(=org)의 모든 스냅샷 메타 목록. PC 별 그룹핑. |
+| GET | `/api/sync/snapshots/:id` | 특정 스냅샷의 items + manifest |
+| GET | `/api/sync/snapshots/:id/bundle` | bundle 다운로드 (cli `sync pull` 이 사용) |
+| POST | `/api/sync/jobs` | web 에서 "복사 실행" 누르면 호출. body: `{ sourceSnapshotId, itemIds[], targetDeviceId, options: { mask, overwrite } }`. response: `{ jobId }` |
+| GET | `/api/sync/jobs?deviceId=...&status=pending` | cli 가 폴링. 자기 deviceId 의 pending job 들 반환. |
+| GET | `/api/sync/jobs/:id` | job 상세 (어떤 items 를 적용해야 하는지, source bundle URL 포함) |
+| POST | `/api/sync/jobs/:id/result` | cli 가 적용 결과 보고. body: `{ status: 'done' \| 'failed' \| 'partial', applied: string[], skipped: string[], errors: [...] }` |
 
-**중요**: web 은 사용자 PC 의 `~/.claude` 를 직접 못 본다. 두 가지 선택지:
+#### 인증·권한 모델
 
-1. **로컬 셀프호스팅** — mytool api 가 사용자 PC 에서 도니까 `fs` 직접 접근. 단순. 기본 가정.
-2. **원격 SaaS 모드** — cli (`mytool sync push`) 가 스캔 후 API 에 업로드, web 에서 조작, cli (`mytool sync pull`) 가 결과를 받아 적용. 복잡하지만 팀 공유에 유리.
+기존 `CliToken` 모델 확장. 토큰마다 `deviceId` (사용자 머신 식별자) 를 묶어 저장.
 
-**1단계는 (1) 셀프호스팅 모드만 지원**. (2) 는 future work 로.
+- `sync push` — 자기 deviceId 의 스냅샷만 생성·갱신 가능
+- `sync pull` — 자기 deviceId 가 target 인 job 만 조회·완료 처리 가능
+- web 은 같은 user 가 본인 소유 모든 deviceId 의 스냅샷 조회 가능 (다른 user 의 deviceId 는 안 보임)
+- bundle 본체는 short-lived signed URL (Supabase Storage 또는 Vercel Blob) 로 5분 만료
+- mask 옵션이 활성화된 스냅샷은 manifest 의 `masked: true` 플래그 + DB 에도 별도 컬럼 → web 에 명시 표시
+
+#### 셀프호스팅·SaaS 동작 차이
+
+| 측면 | 셀프호스팅 (api 가 사용자 PC 에서 도는 경우) | SaaS (지금 사용자님 케이스) |
+| --- | --- | --- |
+| bundle 저장소 | 로컬 디스크 또는 같은 머신의 docker volume | Supabase Storage / Vercel Blob |
+| cli push/pull 의 의미 | 같은 머신끼리도 동작하지만 옵션 — 직접 fs 접근도 가능 | **유일한** 경로 |
+| 인증 | `CliToken` 로컬 발급 | `CliToken` + Supabase auth 연동 |
+| 다중 PC 시나리오 | 굳이 같은 사람이 여러 PC 쓸 일 없으면 1개 deviceId 만 | 자연스럽게 동작 — 회사 PC ↔ 집 PC 등 |
+
+api 코드는 두 모드 모두 같다. 차이는 storage 백엔드뿐 (interface 분리해서 환경변수로 전환).
 
 ### 6.1a Claude Code hook 관련 (3a 섹션 참고)
 
@@ -430,31 +481,60 @@ model HarnessEvent {
 
 ## 7. Web UI
 
-### 7.1 신규 페이지: `/settings/sync`
+### 7.1 신규 페이지: `/settings/sync` — push/pull 모델 (B 안)
 
-레이아웃 (3열):
+레이아웃 (4열). PC 별 스냅샷 개념이 추가됐다.
 
 ```
-┌──────────────┬────────────────────────────┬──────────────┐
-│ 소스(Source) │ 어떤 항목? (Items)         │ 대상(Target) │
-│              │                            │              │
-│ [○ 전역]     │ ☑ global:skill docx        │ ☐ advisor    │
-│ [● shop-mock]│ ☐ global:skill pdf         │ ☑ shop-mock  │
-│ [○ advisor]  │ ☑ project:skill add-api... │ ☑ ce-web     │
-│              │ ☐ project:hookify ...      │              │
-│              │                            │ 옵션         │
-│              │                            │ ☑ 마스킹     │
-│              │                            │ ⊙ 백업 후 덮 │
-│              │                            │ ○ 강제 덮어  │
-│              │                            │ ○ 스킵       │
-│              │                            │              │
-│              │                            │ [복사 실행]  │
-└──────────────┴────────────────────────────┴──────────────┘
+┌─────────────────┬──────────────┬────────────────────────┬──────────────┐
+│ 소스 PC (Device)│ 소스 프로젝트│ 어떤 항목? (Items)     │ 대상         │
+│                 │              │                        │              │
+│ [● desk-home]   │ ○ 전역       │ ☑ global:skill docx    │ Device       │
+│ [○ laptop-work] │ ● shop-mock  │ ☐ global:skill pdf     │ [● desk-home]│
+│ [○ shared-srv]  │ ○ advisor    │ ☑ project:skill add..  │ [☑ laptop ]  │
+│                 │ ○ ce-web     │ ☐ project:hookify ...  │              │
+│ 마지막 push:    │              │                        │ Project      │
+│ 2시간 전        │              │                        │ ☑ shop-mock  │
+│                 │              │                        │ ☑ ce-web     │
+│ [push 가이드]   │              │                        │              │
+│                 │              │                        │ 옵션         │
+│                 │              │                        │ ☑ 마스킹     │
+│                 │              │                        │ ⊙ 백업 후 덮 │
+│                 │              │                        │ ○ 강제 덮어  │
+│                 │              │                        │ ○ 스킵       │
+│                 │              │                        │              │
+│                 │              │                        │ [복사 실행]  │
+└─────────────────┴──────────────┴────────────────────────┴──────────────┘
 ```
 
-- 좌: 등록된 프로젝트 + 전역, 라디오 (소스 1개)
-- 중: 소스에서 스캔된 항목들. **mytool 의 호출 통계가 같이 표시됨** ("최근 30일 호출: 12회"). "안 쓰는 스킬" 필터 가능
-- 우: 한 곳 이상 선택, 옵션 후 실행
+- **1열 — 소스 PC**: 등록된 device 들의 가장 최근 스냅샷. 라디오 (1개). 스냅샷이 오래됐으면 "X일 전 — `mytool sync push` 로 갱신하세요" 같은 안내. 스냅샷 없으면 push 가이드 (`mytool sync push --device=<name>`).
+- **2열 — 소스 프로젝트**: 1열 스냅샷의 프로젝트 목록 + 전역. 라디오.
+- **3열 — 항목**: 2열 선택 결과의 item 들. 체크박스. **mytool 의 UsageRecord 와 조인해서 "최근 30일 호출: 12회"** 표시 (PR 3 의 통합 가치).
+- **4열 — 대상**: device 와 project 둘 다 다중 선택 가능 (전체 cross-product 으로 적용). 옵션 (mask, overwrite mode). "복사 실행" 누르면 SyncJob 들이 생성됨. 대상 PC 의 cli 가 다음 `sync pull` 또는 daemon push 시 받아서 적용.
+
+#### 실행 후 — Job 상태 추적
+
+"복사 실행" 누르면 같은 페이지 하단에 작은 Job 패널이 뜸:
+
+```
+최근 Sync Jobs
+┌──────────────────────────────────────────────────────────┐
+│ ✅ desk-home → laptop-work · shop-mock 의 5개 항목        │
+│    적용 완료 (3분 전)                                    │
+│ ⏳ desk-home → shared-srv · ce-web 의 2개 항목           │
+│    대상 PC 가 아직 sync pull 안 함 (5분 째 대기)         │
+│ ❌ desk-home → laptop-work · global:settings             │
+│    적용 실패: ENOENT /home/.../settings.json             │
+└──────────────────────────────────────────────────────────┘
+```
+
+대상 PC 가 한참 안 받아가면 "수동 트리거" 버튼이 떠서 사용자가 그쪽 PC 가서 `mytool sync pull` 치라고 안내. PR 11 daemon 들어오면 자동 push 되어 이 패널이 거의 항상 ✅ 만 보임.
+
+#### 데이터 페칭 전략
+
+- 1열 (devices) — 한 번 fetch 후 SWR 캐시
+- 3열 (items + 호출 통계) — 2열 선택 시 lazy fetch. 호출 통계는 `UsageRecord` 의 `toolName` 에서 skill 이름 매칭 (skill 호출은 `mcp__skills__<name>` 패턴)
+- 4열 (jobs) — 5초 폴링 또는 SSE (PR 11 daemon 이전 단계까지는 폴링)
 
 ### 7.2 프로젝트 상세 페이지에 토글
 
@@ -523,12 +603,53 @@ packages/web/src/
 - [ ] 단위 테스트 — mask 의 connection string 패턴, scanner 의 자동 탐색
 - 검증: 기존 claude-sync 와 동일한 결과를 내는지 비교 테스트
 
-### PR 3 — Sync API 라우트 + Settings 페이지 (1.5일)
-- [ ] `SyncSnapshot` 마이그레이션
-- [ ] `POST /api/sync/snapshots`, `GET .../latest`, `POST /api/sync/copy`
-- [ ] `/settings/sync` 페이지 (3열 레이아웃)
-- [ ] mytool 의 UsageRecord 와 조인해서 "호출 통계" 컬럼 추가
-- 검증: 한 프로젝트에서 다른 프로젝트로 스킬 복사 후 양쪽 폴더 비교
+### PR 3 — Sync API + push/pull cli + Settings 페이지 (B 안, 2.5일)
+
+> 2026-05-07 갱신: 호스팅 모드를 B (셀프호스팅 + SaaS 양쪽) 로 결정. plan v2 의 1.5일 → 2.5일 로 재산정.
+
+#### 3.1 DB 마이그레이션 (반나절)
+- [ ] `Device` 모델 추가 — `id`, `userId`, `name` (사용자 지정), `hostname`, `platform`, `lastSeenAt`, `cliTokenId` (FK)
+- [ ] 기존 `CliToken` 에 `deviceId` 컬럼 (nullable, 기존 토큰 호환). 새 `mytool login` 시 device 자동 생성·연결.
+- [ ] `SyncSnapshot` — `id`, `orgId`, `deviceId`, `createdBy`, `createdAt`, `bundleStorageKey` (nullable), `manifest` Json, `masked` Boolean, `itemCount` Int
+- [ ] `SyncJob` — `id`, `orgId`, `sourceSnapshotId`, `targetDeviceId`, `targetProjectId` (nullable), `itemIds` Json, `options` Json, `status` (`pending|running|done|failed|partial`), `result` Json?, `createdBy`, `createdAt`, `startedAt?`, `finishedAt?`
+- 마이그레이션 이름: `20260508_add_device_sync_snapshots_jobs`
+
+#### 3.2 Storage 추상화 (반나절)
+- [ ] `packages/api/src/lib/storage.ts` — `BundleStorage` interface (`put`, `getSignedUrl`, `delete`)
+- [ ] 셀프호스팅 구현: 로컬 디스크 (`~/.mytool/bundles/<snapshotId>.zip`)
+- [ ] SaaS 구현: Supabase Storage (또는 Vercel Blob — 일본 리전 latency 비교 후 결정)
+- [ ] 환경변수 `MYTOOL_STORAGE_BACKEND=local|supabase` 로 전환
+
+#### 3.3 API 라우트 (1일)
+- [ ] `POST /api/sync/snapshots` — cli 가 manifest + items 업로드, snapshotId 반환
+- [ ] `POST /api/sync/snapshots/:id/bundle` — bundle zip 업로드 (multipart). 성공 시 `bundleStorageKey` 채움
+- [ ] `GET /api/sync/snapshots` (목록, device 별 그룹핑)
+- [ ] `GET /api/sync/snapshots/:id` (메타)
+- [ ] `GET /api/sync/snapshots/:id/bundle` — signed URL 또는 직접 stream
+- [ ] `POST /api/sync/jobs` — web 의 "복사 실행"
+- [ ] `GET /api/sync/jobs?deviceId=...&status=pending` — cli 폴링
+- [ ] `POST /api/sync/jobs/:id/result` — cli 가 적용 결과 보고
+- [ ] CliToken 권한 체크 미들웨어 — token 의 deviceId 가 source 또는 target 인 경우만 허용
+
+#### 3.4 cli — push/pull 명령 추가 (반나절)
+- [ ] `mytool sync push [--device=<name>]` — 처음 실행 시 device name 묻고 `Device` 생성. `@mytool/sync` 의 `scanAll` + `writeZip` 으로 bundle 만들어 api 에 업로드.
+- [ ] `mytool sync pull [--once]` — 자기 deviceId 의 pending job 1개 처리. `--once` 없으면 30초마다 폴링 (간단 daemon 흉내, PR 11 정식 daemon 의 빌딩블록).
+- [ ] `mytool sync status` — 자기 device 의 마지막 push, pending job 수 표시.
+- [ ] 기존 `mytool-sync` (PR 2) 는 그대로 — 로컬 단독 사용 시.
+
+#### 3.5 Web — `/settings/sync` 페이지 (반나절)
+- [ ] 4열 레이아웃 컴포넌트 (`DevicePicker`, `ProjectPicker`, `ItemTree`, `TargetForm`)
+- [ ] UsageRecord 조인 — items 표시 시 "최근 30일 호출: N회" 컬럼
+- [ ] Job 상태 패널 (5초 폴링)
+- [ ] 빈 상태: device 없으면 `mytool login` + `mytool sync push` 가이드
+
+#### 검증
+- [ ] PC1 에서 `mytool sync push` → web 에서 스냅샷 보임
+- [ ] web 에서 PC1 → PC1 자기자신으로 항목 1개 복사 (단일 PC 로 push/pull 일주)
+- [ ] PC1 에서 `mytool sync pull --once` → 적용됨, 양쪽 폴더 diff 비교
+- [ ] mask 옵션 켰을 때 `.mcp.json` connection string 이 `***` 로 치환됐는지
+- [ ] 다른 user 의 device 가 안 보이는지 (권한 체크)
+- [ ] 일본 리전 latency 측정 — push 시 bundle 1MB 업로드 시간 p95 < 5초 목표
 
 ### PR 4 — packages/harness 격리 + 모노레포 통합 (1일)
 - [ ] `packages/harness/` 로 Python 코드 이전
@@ -598,16 +719,16 @@ packages/web/src/
 
 > Memory 축은 daemon 이 갖춰진 뒤에야 자연스럽다. PR 11 끝나고 실제 사용해본 뒤 우선순위 재평가.
 
-**총 예상 시간**:
-- PR 1~10: 약 9~10 작업일 (워크스페이스 비전과 무관하게 이미 합의된 범위)
-- PR 11: 1.5~2일 추가
+**총 예상 시간** (2026-05-07 PR 3 B 안 채택 후 갱신):
+- PR 1~10: 약 10~11 작업일 (PR 3 가 1.5일 → 2.5일로 늘어남)
+- PR 11: 1.5~2일 추가. 단 PR 3 의 sync pull 폴링이 daemon 의 빌딩블록이 되어 PR 11 자체는 가벼워짐.
 - PR 12+: TBD
 
 **현실적 권장 마일스톤**:
-- M1 (PR 1~3, 약 3일): Skills 축 1차 완성. Settings 페이지에서 스킬 이전 가능.
+- M1 (PR 1~3, 약 4일): Skills 축 1차 완성. push/pull 모델로 셀프호스팅·SaaS 양쪽 동작.
 - M2 (PR 4~6, 약 3.5일): Execution 축 1차 완성. Harness 자동 사이클 돌아감.
 - M3 (PR 7~10, 약 3일): hook 강제 + 인사이트 결합. 현재 비전의 1차 마침표.
-- M4 (PR 11, 약 2일): daemon 도입. latency 개선 + Memory 축 준비.
+- M4 (PR 11, 약 1.5일): daemon 도입. PR 3 의 폴링을 WebSocket push 로 승격 + Memory 축 준비.
 - M5 (PR 12+): Memory 축 + 정체성 재정립. 시점 미정.
 
 ## 9. 호환성·이전 전략
@@ -619,9 +740,10 @@ packages/web/src/
 ## 10. 결정 보류 사항
 
 - **백엔드 프레임워크 (Hono vs NestJS)**: 현재 Hono 유지. M1 (PR 1~3) 끝난 뒤 사용자님이 작업 속도·답답함 등을 평가해서 마이그레이션 여부 결정. 미리 결정하지 않음.
-- **SaaS 모드 (원격 스캔)**: 1단계는 셀프호스팅 가정. 팀에 공유할 단계가 오면 cli 가 스냅샷 push/pull 하는 흐름으로 확장.
+- **bundle storage 백엔드 (Supabase Storage vs Vercel Blob)**: PR 3.2 작업 중 일본 리전 latency 측정 후 결정. 인터페이스는 추상화돼 있어 나중에 바꿔도 됨.
 - **harness 의 Claude Code 호출 환경**: API 가 spawn 한 subprocess 가 어떤 cwd, 어떤 user 로 도는지 (셀프호스팅 docker 컨테이너 내부면 git/claude 바이너리 마운트 필요). compose 파일 수정 가능성 있음.
 - **Web 인증과 harness CLI**: web 세션과 harness 의 reportToken 은 분리. token 은 1회용·short-lived.
+- **Device naming UX**: `mytool sync push` 첫 실행 시 device name 을 어떻게 받을지 — hostname 자동 사용 vs 사용자 입력 강제. PR 3.4 에서 결정.
 
 ### 10a. 결정된 사항 (2026-05-07, v2 갱신)
 
@@ -632,13 +754,20 @@ packages/web/src/
 - **SLA**: 일본 서버 latency 고려해 SessionStart 800ms / PreToolUse 500ms / Stop async. daemon 도입 시 100ms 이내로 단축. → §3a, §6.1a
 - **정체성 재정립**: 4축 워크스페이스 비전 채택 (Memory · Skills · Execution + Observability backbone). 단, **PR 1~10 까지는 정체성 재정립 작업 없이 그대로 진행**, PR 11 끝난 뒤 README/description 갱신 검토. → §0
 - **cli daemon 도입**: PR 11 로 추가. Vercel 호스팅 + Memory 축 구현을 위해 사실상 필수. 단 daemon 없이도 모든 기능은 fallback 으로 동작. → §3a.7, PR 11
+- **PR 3 호스팅 모드 — B 안 채택** (2026-05-07): 셀프호스팅·SaaS 양쪽 지원. api 는 사용자 PC fs 직접 접근 안 함. cli 의 `sync push` (스냅샷 업로드) + `sync pull` (job 폴링·적용) 명령이 핵심. 작업량 1.5일 → 2.5일. PR 3 의 폴링 메커니즘이 PR 11 daemon 의 빌딩블록이 되어 PR 11 은 가벼워짐. → §6.1, §7.1, PR 3
+- **PR 3 의 Storage 백엔드**: `BundleStorage` interface 로 추상화. 셀프호스팅=로컬 디스크, SaaS=Supabase Storage 또는 Vercel Blob (일본 리전 latency 비교 후 PR 3 작업 중 결정). → §6.1, PR 3.2
+- **deviceId 모델**: `Device` 신규 + `CliToken.deviceId` 추가. 사용자 한 명이 여러 PC 쓰는 시나리오 자연스럽게 지원. push 는 자기 device 만, pull 은 자기 device 가 target 인 job 만. → §6.1, PR 3.1
 
 ## 11. 위험과 완화
 
 | 위험 | 완화책 |
 | --- | --- |
 | Python·Node 모노레포 빌드 복잡 | turbo task shim + CI 에 두 런타임 모두 설치. 실패해도 sync/api/web 빌드는 무관하게 진행. |
-| sync 가 마운트되지 않은 사용자 PC 의 파일을 못 봄 | 1단계는 셀프호스팅(api 가 사용자 PC 에서 직접 동작) 가정. SaaS 모드는 future work. |
+| api 가 사용자 PC fs 직접 접근 못 함 (SaaS 모드) | B 안 — cli `sync push`/`pull` 로 양방향. push 는 즉시, pull 은 폴링 (PR 11 daemon 후 push). |
+| bundle zip 이 너무 커서 업로드 실패 | manifest 에 5MB soft limit. 초과 시 cli 가 사용자에게 "이 항목은 너무 큽니다, 제외하시겠습니까?" 확인. |
+| 다른 user 의 device·snapshot 노출 | 모든 sync 라우트에 user.id 와 token.deviceId 양쪽 권한 체크. snapshot 의 orgId 와 user 의 orgMembership 일치 검증. |
+| bundle 에 시크릿 평문 저장 | mask 옵션 기본 ON. masked=false 인 스냅샷은 web 에 빨간 경고. Storage 의 bundle 은 signed URL 5분 만료. |
+| 사용자가 sync pull 안 해서 job 이 영원히 대기 | web 에 "수동 트리거" 안내 + 7일 후 자동 만료. PR 11 daemon 가 들어오면 자동 처리. |
 | harness 가 무한 루프 | 기존 max_iterations 유지 + mytool 측에서 timeout + abort 라우트 |
 | 시크릿 누출 (`.mcp.json` 의 비밀번호) | sync 의 마스킹 옵션을 export/copy 시 기본 ON. 마스킹된 데이터에는 manifest 에 플래그. |
 | PreToolUse hook 이 응답 늦으면 사용자 작업 멈춤 | 200ms timeout 후 default allow. mytool API p95 모니터링. Vercel 의 cold start 를 keep-alive ping 으로 완화. |

@@ -75,7 +75,42 @@
   6. `node packages/sync/dist/cli.js scan -j` 와 `claude-sync scan -j` 결과 비교 (jq 로 정렬 후 diff 권장). 차이가 나면 PR 2 끝나기 전에 수정.
   7. 모든 검증 통과 시 commit 분리: (a) 스캐폴딩, (b) lib TS 이전 + 테스트, (c) CLI shim. 옵션으로 cli/package.json 복구 commit.
 
-### 다음 세션 시작 시
-1. `docs/integration-plan.md` 읽기 — 4축 비전, 결정사항 (§10a)
-2. `docs/progress-log.md` (이 파일) 읽기 — 어디까지 했는지
-3. **Session 3 의 사용자 후속 작업 7단계** 점검 후 PR 3 (Sync API + Settings 페이지) 진입.
+### Session 4 — PR 2 검증 마무리 + PR 3 호스팅 모드 결정 (B 안) + plan 갱신
+- **PR 2 사용자 PC 검증 통과**:
+  - `cli/package.json` 정상 (마운트만 stale 했던 것 — 호스트 cat 으로 확인 시 41줄 정상)
+  - `pnpm install` / `typecheck` / `test` / `build` 모두 통과
+  - `mytool-sync scan -j` ↔ `claude-sync scan -j` 동일성 비교 통과
+  - commit 분리는 사용자가 5단계 가이드대로 직접 진행 (스캐폴딩 / lib+테스트 / CLI / progress-log)
+- **PR 3 호스팅 모드 결정 — B 안 (셀프호스팅 + SaaS 양쪽)**:
+  - 이유: 사용자님이 Vercel + Supabase 일본 리전 배포 중 → SaaS 모드 동작이 사실상 필수
+  - api 는 절대 사용자 PC fs 직접 접근 안 함. cli 의 `sync push` (스냅샷+bundle 업로드) + `sync pull` (job 폴링·적용) 가 핵심
+  - 작업량: plan v2 의 1.5일 → 2.5일 로 재산정. 단 PR 3 의 폴링 메커니즘이 PR 11 daemon 의 빌딩블록이 되어 PR 11 은 1.5~2일 → 1.5일 로 가벼워짐
+- **integration-plan v3 갱신** (이번 세션):
+  - §6.1 — push/pull 흐름 다이어그램, 라우트 8개 (snapshots/bundle/jobs), CliToken+deviceId 권한 모델, 셀프호스팅·SaaS 동작 차이표
+  - §7.1 — 4열 레이아웃 (Device/Project/Items/Target), Job 상태 패널 (5초 폴링), UsageRecord 조인 위치 명시, 빈 상태 가이드
+  - §8 PR 3 — 5단계로 세분화 (3.1 DB / 3.2 Storage / 3.3 API / 3.4 cli / 3.5 Web), 검증 6항목
+  - §8 마일스톤 — M1 = 3일 → 4일, 총 PR 1~10 = 9~10일 → 10~11일
+  - §10a — B 안 / Storage 백엔드 / deviceId 모델 결정사항 3개 추가
+  - §10 보류사항 — bundle storage 백엔드 (Supabase vs Vercel Blob, PR 3.2 측정 후 결정), Device naming UX 추가
+  - §11 위험 — bundle 크기 한도, 다른 user device 노출, 시크릿 평문, pull 미실행 만료 4개 추가
+- **새 도입 모델 메모** (PR 3 시작 시 핵심):
+  - `Device` 모델 신규 — userId / name / hostname / platform / lastSeenAt / cliTokenId
+  - `CliToken` 에 `deviceId` (nullable, 기존 토큰 호환)
+  - `SyncSnapshot` — orgId / deviceId / bundleStorageKey / manifest Json / masked Boolean / itemCount
+  - `SyncJob` — sourceSnapshotId / targetDeviceId / targetProjectId / itemIds Json / options / status / result Json
+  - 마이그레이션 이름: `20260508_add_device_sync_snapshots_jobs`
+  - `BundleStorage` interface (`packages/api/src/lib/storage.ts`) — `MYTOOL_STORAGE_BACKEND=local|supabase` 로 전환
+
+### 다음 세션 시작 시 (PR 3 진입)
+
+명령어 (그대로 복사해서 새 세션에 붙여넣기):
+
+```
+mytool 통합 작업 이어가자. `docs/integration-plan.md` 와 `docs/progress-log.md` 읽고
+PR 3 (Sync API + Settings 페이지, B 안 = 셀프호스팅 + SaaS 양쪽 지원) 시작해줘.
+```
+
+읽을 순서:
+1. `docs/integration-plan.md` §6.1 (push/pull 흐름·라우트), §7.1 (4열 UI), §8 PR 3 (5단계 작업), §10a (B 안 결정사항)
+2. `docs/progress-log.md` Session 4 (이 항목)
+3. PR 3.1 (DB 마이그레이션) 부터 순서대로 진행
