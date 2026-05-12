@@ -1,2 +1,12 @@
+# Explicit list (not "packages/*") so that packages/harness (Python) is
+# excluded from pnpm. The harness package has no pnpm role — it is built
+# via pyproject and invoked from root scripts (pnpm run test:harness etc).
+#
+# When adding a new TypeScript/JS workspace package, list it explicitly below.
 packages:
-  - "packages/*"
+  - "packages/api"
+  - "packages/web"
+  - "packages/cli"
+  - "packages/shared"
+  - "packages/sync"
+  # packages/harness — Python (pyproject), not a pnpm workspace.
