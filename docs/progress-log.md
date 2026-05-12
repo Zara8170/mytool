@@ -101,16 +101,71 @@
   - 마이그레이션 이름: `20260508_add_device_sync_snapshots_jobs`
   - `BundleStorage` interface (`packages/api/src/lib/storage.ts`) — `MYTOOL_STORAGE_BACKEND=local|supabase` 로 전환
 
-### 다음 세션 시작 시 (PR 3 진입)
+### Session 5 — PR 3 코드 작성 (5 단계 모두) — 사용자 PC 검증 대기
+- **PR 3.1 — DB 마이그레이션** (`20260508000000_add_device_sync_snapshots_jobs`)
+  - `Device` 모델 추가 (userId / name / hostname / platform / lastSeenAt). `unique([userId, name])`.
+  - `CliToken.deviceId` 컬럼 추가 (nullable, `SET NULL` on Device 삭제, 기존 토큰 호환).
+  - `SyncSnapshot` (orgId / deviceId / bundleStorageKey / manifest Json / masked / itemCount).
+  - `SyncJob` (sourceSnapshotId / targetDeviceId / targetProjectId? / itemIds / options / status / result?).
+  - `User`, `Organization` 에 새 관계 등록.
+- **PR 3.2 — Storage 추상화**
+  - `BundleStorage` interface (`put` / `getSignedUrl` / `read` / `delete` / `kind`).
+  - `LocalBundleStorage` (셀프호스팅·로컬 디스크). `SupabaseBundleStorage` (REST, service-role key).
+  - `getBundleStorage()` 싱글턴. 환경변수: `MYTOOL_STORAGE_BACKEND` / `MYTOOL_STORAGE_LOCAL_DIR` / `MYTOOL_STORAGE_SUPABASE_BUCKET` / `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`.
+  - `packages/api/src/lib/storage.ts` 와 `packages/web/src/lib/storage.ts` 에 동일 구현 (Vercel 의 read-only fs 대비 `/tmp` fallback 만 web 쪽에 추가).
+  - `packages/api/src/env.ts` 에 새 env 5개 추가.
+- **PR 3.3 — Sync API 라우트 8개**
+  - `packages/shared/src/schemas/sync.ts` 신규 — SyncManifestItem 에 `id` 필드 (안정 식별자) 포함, RegisterDevice / CreateSnapshot / CreateJob / ReportJobResult / SyncJobWork 등.
+  - `packages/api/src/routes/sync.ts` (Hono, 셀프호스팅용) — `/devices`, `/snapshots`, `/snapshots/:id`, `/snapshots/:id/bundle`, `/jobs`, `/jobs/:id`, `/jobs/:id/result` (GET·POST 묶음 8개).
+  - `packages/web/src/app/api/sync/**` — 동일 라우트의 Next.js 버전. SaaS (Vercel) 호스팅용 진입점.
+  - `requireAuthAny` (web) 신규 — Bearer (cli) 와 mytool_token 쿠키 (web) 양쪽 인증 통합. 토큰의 `deviceId` 도 컨텍스트로 노출.
+  - `auth` 미들웨어 (api·web 둘 다) 의 `select` 에 `deviceId: true` 추가, `tokenDeviceId` 변수 도입.
+  - 권한: snapshot push 는 자기 token 의 device 만, pull (job 조회) 은 자기 token 의 device 가 target 인 것만, web 은 user 의 모든 device 인바운드 job 조회.
+- **PR 3.4 — CLI sync push/pull/status**
+  - cli 의 `package.json` 에 `@mytool/sync` (workspace), `yauzl`, `@types/yauzl` 추가.
+  - `api-client.ts` 에 sync 메서드 8개 추가 (registerDevice / listDevices / createSnapshot / uploadBundle (raw bytes, 60s timeout) / listSnapshots / listJobs / getJob / reportJobResult / downloadBundle).
+  - `commands/sync/common.ts` — bootstrap 헬퍼 (config 검증 + apiUrl 해석 + hostname/platform 채집).
+  - `commands/sync/push.ts` — `mytool sync push [--device <name>] [--no-mask] [--roots <...>]`. device 등록 → scanAll → mask → writeZip (임시 디렉토리) → POST snapshot → POST bundle.
+  - `commands/sync/pull.ts` — `mytool sync pull [--once] [--interval <ms>]`. 자기 device 의 pending job 폴링 → bundle 다운로드 → manifest 의 itemIds 매칭 → overwrite 옵션 (backup/force/skip) 처리 → extractPaths → POST result.
+  - `commands/sync/status.ts` — `mytool sync status`. devices + 최근 push + pending job 수 표시. 자기 hostname 매칭 device 에 ● 표시.
+  - `index.ts` 에 `mytool sync <push|pull|status>` 서브명령 등록.
+- **PR 3.5 — Web /settings/sync 페이지**
+  - `packages/web/src/app/settings/sync/page.tsx` (server) — 토큰 검증 + 초기 데이터 (devices, snapshots, projects, jobs, skill 호출 통계 30일) → SyncDashboard 에 props.
+  - `packages/web/src/components/sync/sync-dashboard.tsx` (client) — 4열 그리드 (Source Device / Source Scope / Items / Target+Options). manifest lazy fetch, 5초 jobs 폴링, 빈 상태 가이드.
+  - 최근 30일 skill 호출 수: `Event` 의 `isSkillCall=true` + `skillName` group-by. project:skill / global:skill 항목 옆에 "N calls (30d)" 배지.
+  - "복사 실행" 은 target device × project 조합 cross-product 으로 SyncJob 생성. project-scope item 이 있으면 target project 필수.
+  - `/settings` 메인 페이지에 "Workspace → Sync" 섹션 신규.
+- **세션 내 셀프 점검 통과**
+  - sync 라이브러리의 sub-path exports (`@mytool/sync/scanner` 등) 모두 OK.
+  - `@mytool/sync` 가 cli deps 에 추가됨.
+  - `next.config` 의 `transpilePackages` 는 `@mytool/shared` 만 — web 에서 `@mytool/sync` 는 import 안 함 (sync 페이지는 shared 의 타입만 사용).
+- **사용자 PC 에서 다음 검증 필요** (Session 6 시작 시):
+  1. `pnpm install` — cli 의 새 deps (`@mytool/sync`, `yauzl`, `@types/yauzl`) 설치
+  2. `pnpm --filter @mytool/api prisma generate` — Device / SyncSnapshot / SyncJob 클라이언트 타입 생성
+  3. `pnpm --filter @mytool/api prisma migrate dev` (또는 dev 환경에서 `migrate reset`) — `20260508000000_add_device_sync_snapshots_jobs` 적용
+  4. `pnpm -w typecheck` — 워크스페이스 전체 타입 통과 확인
+  5. `pnpm -w build` — web/api/cli/sync/shared 모두 빌드
+  6. `mytool sync push` (셀프호스팅 또는 dev 프로필) — 웹의 `/settings/sync` 에서 device + 스냅샷 보이는지
+  7. self-target 일주: 같은 device 로 pull 받아 적용 (백업 모드) — 양쪽 폴더 diff 없는지 (mask 적용된 항목 제외)
+  8. mask 옵션 검증 — `.mcp.json` connection string 이 `***` 로 치환됐는지
+  9. 다른 user 의 device 안 보이는지 (요점이지만 single-user 환경에서는 직접 확인 어려움)
+  10. 일본 리전 latency — push 시 1MB 업로드 p95 < 5초 목표
+- **알려진 잠재 이슈 / 미해결**:
+  - Vercel 의 `/tmp` 는 함수 호출 사이 휘발성 — local storage backend 를 SaaS 에서 쓰면 push 후 다른 invocation 에서 read 못 할 수 있음. SaaS 배포 시 반드시 `MYTOOL_STORAGE_BACKEND=supabase` 설정해야 함. dev/local 에서는 무관.
+  - Supabase Storage bucket 은 별도 생성 필요 (`mytool-bundles` 같은 이름). RLS 는 service-role 로 우회.
+  - PR 1 의 PATCH 라우트와 동일 패턴이라, web 의 `[projectId]/route.ts` 의 `requireWebAuth()` 와 sync 의 `requireAuthAny()` 는 별도 헬퍼. 점진적으로 통합 가능하지만 지금은 분리 유지 (PR 3 는 Bearer 도 받아야 하므로 더 넓은 인터페이스).
+  - sync push 의 manifest 에 `id` 필드를 추가했는데, sync 라이브러리의 `SyncManifestItem` 에는 그 필드가 없어 `as unknown as` 캐스트로 우회. PR 3 후속 정리 시 `@mytool/sync` 의 타입을 shared 의 타입으로 통합 검토.
+
+### 다음 세션 시작 시 (PR 3 검증 + 가능하면 commit)
 
 명령어 (그대로 복사해서 새 세션에 붙여넣기):
 
 ```
-mytool 통합 작업 이어가자. `docs/integration-plan.md` 와 `docs/progress-log.md` 읽고
-PR 3 (Sync API + Settings 페이지, B 안 = 셀프호스팅 + SaaS 양쪽 지원) 시작해줘.
+mytool 통합 작업 이어가자. `docs/progress-log.md` 의 Session 5 끝부분 검증 가이드 따라
+PR 3 검증 도와줘. 통과하면 commit 분리도.
 ```
 
 읽을 순서:
-1. `docs/integration-plan.md` §6.1 (push/pull 흐름·라우트), §7.1 (4열 UI), §8 PR 3 (5단계 작업), §10a (B 안 결정사항)
-2. `docs/progress-log.md` Session 4 (이 항목)
-3. PR 3.1 (DB 마이그레이션) 부터 순서대로 진행
+1. `docs/progress-log.md` Session 5 의 "사용자 PC 에서 다음 검증 필요" 10개 항목
+2. 검증 통과 시 commit 분리 (예: 3.1 DB / 3.2 Storage / 3.3 API / 3.4 cli / 3.5 web / 3.6 progress-log)
+3. 막히면 어느 단계에서 막혔는지 적어주면 그 부분 디버그
