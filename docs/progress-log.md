@@ -156,16 +156,99 @@
   - PR 1 의 PATCH 라우트와 동일 패턴이라, web 의 `[projectId]/route.ts` 의 `requireWebAuth()` 와 sync 의 `requireAuthAny()` 는 별도 헬퍼. 점진적으로 통합 가능하지만 지금은 분리 유지 (PR 3 는 Bearer 도 받아야 하므로 더 넓은 인터페이스).
   - sync push 의 manifest 에 `id` 필드를 추가했는데, sync 라이브러리의 `SyncManifestItem` 에는 그 필드가 없어 `as unknown as` 캐스트로 우회. PR 3 후속 정리 시 `@mytool/sync` 의 타입을 shared 의 타입으로 통합 검토.
 
-### 다음 세션 시작 시 (PR 3 검증 + 가능하면 commit)
+### Session 6 — PR 3 검증 통과 + commit 분리 (사용자 PC)
 
-명령어 (그대로 복사해서 새 세션에 붙여넣기):
+- **PR 3 사용자 PC 검증 통과** — Session 5 가이드 10개 항목 그대로 진행:
+  - `pnpm install` / `prisma generate` / `prisma migrate dev` 모두 통과
+  - `pnpm -w typecheck` / `pnpm -w build` 깨끗
+  - `mytool sync push` 후 web `/settings/sync` 에 device + snapshot 표시
+  - self-target pull (백업 모드) 일주, 적용된 폴더 diff 없음
+  - mask 옵션으로 `.mcp.json` connection string 이 `***` 로 치환됨
+  - 일본 리전 latency 측정은 single-user 환경 + small bundle 이라 p95 미만 (목표 < 5s 충분히 만족)
+- **commit 분리 (5단계)** — develop 브랜치에 push:
+  1. `feat(db): PR 3.1 add Device / SyncSnapshot / SyncJob models` (`ca385c2`)
+  2. `feat(storage): PR 3.2 BundleStorage abstraction (local + Supabase)` (`0c32f7b`)
+  3. PR 3.3 (API 라우트) — 위 두 커밋과 같은 PR 안에 묶일 만큼 작아 통합 (별도 커밋 없음)
+  4. `feat(cli): PR 3.4 sync push/pull/status commands` (`ef19c10`)
+  5. `feat(web): PR 3.5 /settings/sync 4-column dashboard` (`bdaa90b`)
+  6. `docs: PR 3 progress-log (Session 5 — code) + Session 6 (verify)` (`0a34fdc`) — Session 6 까지의 문서는 Session 7 시작 시 갱신
+- **Vercel develop 자동 배포 차단** (별도 커밋 `8a7d68e`): `chore(web): disable Vercel auto-deploy for develop branch`. PR 3 같이 큰 변경이 prod 에 자동 흘러가지 않도록 ignored build steps 조정.
+
+### Session 7 — PR 4 (packages/harness 격리 + 모노레포 통합) 코드 작성
+
+- **PR 4.1 — `packages/harness/` 로 Python 코드 이전**:
+  - 원본 `C:\git\personal\claude-harness` 의 `claude_harness/` (6개 모듈) + `tests/` (8개) + `pyproject.toml` + `.gitignore` 를 그대로 복사.
+  - 캐시 디렉토리 (`__pycache__/`, `.pytest_cache/`, `*.egg-info/`) 와 git 메타데이터는 제외 — `.gitignore` 가 이미 잡고 있음.
+  - `README.md` 는 모노레포 컨텍스트로 재작성 — pip 설치 경로 `packages/harness`, mytool 통합 옵션 (`--report-url` / `--report-token`) 안내, "Python (pyproject), pnpm 미참여" 명시.
+- **PR 4.2 — `pnpm-workspace.yaml` 명시 목록**:
+  - 기존 `packages/*` 글롭 1줄을 5개 명시 목록으로 변경 (`api / web / cli / shared / sync`).
+  - harness 는 의도적으로 빠짐 — Python 패키지라 pnpm 이 건드리지 않도록.
+  - 주석으로 "새 TS/JS 패키지 추가 시 명시 목록에 직접 추가" 안내.
+- **PR 4.3 — turbo task + package.json shim**:
+  - turbo v2 는 `pnpm-workspace.yaml` 에 없는 패키지를 자동 발견하지 못하므로 `harness#build/test` 를 turbo task 로 정의하는 방식은 의미가 없음 (plan §4.2 의 패턴과 다소 다르지만 더 명확한 해법). 대신 **루트 `package.json` 의 npm scripts** 에서 직접 호출:
+    - `test: turbo test && pnpm run test:harness`
+    - `test:harness: cd packages/harness && python -m pytest -q`
+    - `build` / `build:harness` 도 동일 패턴 (build 는 사실상 no-op).
+  - `packages/harness/package.json` 은 **얇은 shim** 만 둠 (`private: true`, scripts 4개). pnpm 워크스페이스에는 안 들어가지만, 향후 turbo 가 인식하게 만들고 싶어질 때를 대비.
+- **PR 4.4 — CI 워크플로우 신규** (`.github/workflows/harness.yml`):
+  - 모노레포에 워크플로우 디렉토리 자체가 없었음. 이번에 신규.
+  - `ubuntu-latest` + `actions/setup-python@v5` (3.11) + `pip cache (pyproject.toml)` + `pip install -e . && pip install pytest && pytest`.
+  - `paths` 필터: `packages/harness/**` 또는 워크플로우 자체 변경 시만 실행 → 비용 절약.
+  - **결정**: Node 쪽 CI 는 이번 PR 의 범위 밖. harness 만 한정. 후속 별도 PR 로 Node 빌드/테스트 워크플로우 추가 고려.
+- **PR 4.5 — `--report-url` / `--report-token` 옵션** (mytool 통합 진입점):
+  - `claude_harness/reporter.py` 신규 — `Reporter` Protocol + `NullReporter` + `HttpReporter`.
+  - 외부 deps 추가 없이 stdlib `urllib.request` 사용. 타임아웃 5s, fail-open (실패 시 stderr 한 줄 + 계속).
+  - payload schema: `{ phase, level, ts (ISO-8601 UTC Z), payload }`. mytool API §6.2 의 `POST /api/harness/runs/:runId/events` 와 1:1.
+  - `cli.py run` 에 두 옵션 추가 (envvar `HARNESS_REPORT_URL/TOKEN` 도 지원). 한쪽만 지정 시 경고 후 NullReporter (safer default).
+  - `runner.py` 의 `run_once`/`run_loop` 시그니처에 `reporter: Optional[Reporter] = None` 추가. None 이면 `NullReporter()` — **기존 호출 경로 의미 100% 보존**.
+  - phase 전이마다 `rep.emit(phase, level, payload)` 호출: ideation 선택, build 시작/완료, verify 시작/결과, report 결과 (pass: outcome=pass / fail: outcome=fail + rolled_back_to).
+  - 새 테스트 `test_reporter.py` 7개 + `test_runner.py` 에 reporter emit 검증 1개 추가.
+- **세션 내 검증 통과 (Linux 샌드박스에서 직접 실행)**:
+  - `python3 -m py_compile` — 모든 모듈/테스트 통과
+  - `python3 -m pytest -v` — **27 passed in 0.18s** (원본 19 + reporter 7 + runner emit 1)
+  - `harness run --help` — `--report-url` / `--report-token` 옵션 정상 노출
+  - 디스크 무결성: PR 2 세션 3 과 같은 mount sync 손상이 cli.py / runner.py / pnpm-workspace.yaml / package.json / progress-log.md 5개에서 발생 → bash heredoc 으로 강제 재기록 후 git diff 로 정상 반영 확인.
+- **알려진 잠재 이슈 / 미해결**:
+  - turbo task 로 harness 를 등록하지 않은 결정이 plan v2 §4.2 와 약간 다름. 사용자 PC 에서 `pnpm test` 가 turbo + pytest 둘 다 깔끔히 도는지 검증 필요. 만약 plan 의 `harness#test` 명령어 형태가 꼭 필요하면 root 의 `pnpm test:harness` 를 alias 정도로 추가하면 됨.
+  - CI 워크플로우는 harness 만 한정. Node 측 CI 는 별도 후속 PR. 지금 develop push 시 GitHub Actions 가 harness 워크플로우만 돌 것.
+  - PR 5 (Harness API + Run/Event 모델 + SSE) 가 mytool 측에서 reporter payload 를 받는 endpoint 를 만들어야 비로소 reporter 가 end-to-end 동작. 지금은 NullReporter 로만 검증.
+  - `pyproject.toml` 의 `requires-python = ">=3.11"` 인데 샌드박스 Python 은 3.10 이라 `pip install -e .` 시 `--ignore-requires-python` 으로 우회했음. 사용자 PC (3.11+) 에서는 해당 옵션 불필요.
+
+#### 사용자 PC 에서 다음 검증 필요 (Session 8 시작 시)
+
+1. **mount sync 손상 점검** — 우선 호스트에서 다음 파일들의 바이트 크기 확인:
+   - `packages/harness/claude_harness/cli.py` ≈ 1668B (이 안에 `--report-url` 옵션 정의가 있어야 함)
+   - `packages/harness/claude_harness/runner.py` ≈ 2717B
+   - `packages/harness/claude_harness/reporter.py` ≈ 3519B
+   - `packages/harness/tests/test_runner.py` ≈ 2381B
+   - `pnpm-workspace.yaml` ≈ 479B
+   - `package.json` ≈ 1020B (scripts 에 `test:harness`, `build:harness` 가 있어야 함)
+   - 어느 하나라도 잘려 있으면 (PR 2 session 3 과 동일 패턴) Session 7 의 diff 를 참고해서 호스트에서 직접 복구.
+2. `cd packages/harness && pip install -e . && pip install pytest && python -m pytest -q` — 27개 PASS 확인.
+3. `harness run --help` 에 `--report-url` / `--report-token` 보이는지.
+4. `pnpm install` (루트) — `pnpm-workspace.yaml` 변경 후 packages/harness 가 lockfile 에 들어가지 않는지 (`pnpm-lock.yaml` 변경 없음이 기대치).
+5. `pnpm test` (루트) — turbo test (Node) → pytest (Python) 두 단계 모두 PASS 인지. **단 사용자 PC 에 Python 3.11 이 PATH 에 있어야** harness 테스트가 돔. 없으면 `pnpm test:harness` 만 skip 하거나 Python 셋업 후 재실행.
+6. (선택) `git push origin develop` 후 GitHub Actions 의 `harness` 워크플로우가 ubuntu-latest 에서 동일하게 27 PASS 내는지 확인.
+7. commit 분리 권장:
+   - `feat(harness): port claude-harness to packages/harness (PR 4.1)` — claude_harness/ + tests/ + pyproject + .gitignore + README
+   - `chore(workspace): explicit pnpm packages list, exclude harness (PR 4.2)` — pnpm-workspace.yaml
+   - `chore(build): root scripts dispatch to harness pytest (PR 4.3)` — root package.json + packages/harness/package.json shim
+   - `ci(harness): add Python 3.11 pytest workflow (PR 4.4)` — .github/workflows/harness.yml
+   - `feat(harness): --report-url / --report-token reporter (PR 4.5)` — reporter.py + cli.py 변경 + runner.py 변경 + test_reporter.py + test_runner.py emit 테스트
+   - `docs: PR 4 progress-log (Session 7 — code) + Session 6 (verify recap)` — docs/progress-log.md
+
+### 다음 세션 시작 시 (PR 4 검증 + PR 5 시작)
+
+명령어 (그대로 복사):
 
 ```
-mytool 통합 작업 이어가자. `docs/progress-log.md` 의 Session 5 끝부분 검증 가이드 따라
-PR 3 검증 도와줘. 통과하면 commit 분리도.
+mytool 통합 이어가자. docs/progress-log.md 의 Session 7 끝부분
+"사용자 PC 에서 다음 검증" 7개 따라 PR 4 검증 도와줘.
+통과하면 commit 분리 + PR 5 (Harness API + Run/Event 모델 + SSE) 시작.
 ```
 
 읽을 순서:
-1. `docs/progress-log.md` Session 5 의 "사용자 PC 에서 다음 검증 필요" 10개 항목
-2. 검증 통과 시 commit 분리 (예: 3.1 DB / 3.2 Storage / 3.3 API / 3.4 cli / 3.5 web / 3.6 progress-log)
-3. 막히면 어느 단계에서 막혔는지 적어주면 그 부분 디버그
+1. `docs/progress-log.md` Session 7 "사용자 PC 에서 다음 검증 필요" 7개 항목
+2. mount sync 손상 가능성 (1번) 부터 — 손상 발견 시 Session 7 의 diff 로 복구
+3. 검증 통과 시 commit 분리 (PR 4.1 ~ 4.5 + progress-log)
+4. PR 5 시작: integration-plan §6.2, §8 PR 5 참고. `HarnessRun` / `HarnessEvent` 마이그레이션부터.
