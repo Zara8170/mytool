@@ -217,6 +217,7 @@ model Project {
   events       Event[]
   usageRecords UsageRecord[]
   dailyStats   DailyProjectStats[]
+  harnessRuns  HarnessRun[]
 
   @@unique([orgId, slug])
   @@map("projects")
@@ -342,4 +343,60 @@ model Message {
   @@unique([sessionId, orderIdx])
   @@index([sessionId, orderIdx])
   @@map("messages")
+}
+// ============================================================
+// PR 5 — Harness Run / Event (integration-plan §5, §6.2)
+// ============================================================
+
+/// 한 번의 `harness run` 실행을 추적. 보통 API 가 spawn 한 subprocess 가
+/// reportToken 으로 인증해서 phase 전이 이벤트를 POST 한다.
+/// status: running | passed | failed | aborted
+model HarnessRun {
+  id             String    @id @default(cuid())
+  projectId      String
+  /// 누가 시작했는지 (web 의 "Run" 버튼 누른 user, 또는 cli 의 user)
+  startedBy      String
+  startedAt      DateTime  @default(now())
+  finishedAt     DateTime?
+  /// running | passed | failed | aborted
+  status         String    @default("running")
+  /// 이터레이션 카운트 — verify 통과까지 몇 번 빌드/리포트 돌았는지.
+  iterations     Int       @default(0)
+  /// CLI 가 events 라우트 호출 시 Bearer 로 쓰는 short-lived token.
+  /// SHA-256 해시로 저장 (평문은 발급 시 1회만 응답).
+  reportTokenHash String   @unique
+  /// 토큰 만료. 보통 startedAt + 24h.
+  reportTokenExpiresAt DateTime
+  /// harness.yaml 캐시 (시작 시점). 나중에 web 에서 비교용.
+  configSnapshot Json?
+
+  project Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events  HarnessEvent[]
+
+  @@index([projectId, startedAt])
+  @@index([status])
+  @@map("harness_runs")
+}
+
+/// harness CLI 가 phase 전이마다 보내는 이벤트.
+/// claude-harness 의 reporter.py payload schema 와 1:1:
+///   { phase, level, ts (ISO-8601 UTC), payload }
+/// phase: ideation | build | verify | report
+/// level: info | warn | error
+model HarnessEvent {
+  id      String   @id @default(cuid())
+  runId   String
+  /// 이벤트 발생 시각 (reporter 가 보낸 ts). 서버 도착 시각이 아님.
+  ts      DateTime
+  phase   String
+  level   String   @default("info")
+  /// reporter 의 자유로운 payload. 예: { outcome, rolled_back_to, requirement_id, ... }
+  payload Json
+  /// 서버 도착 시각 (디버그용)
+  createdAt DateTime @default(now())
+
+  run HarnessRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, ts])
+  @@map("harness_events")
 }
