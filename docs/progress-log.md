@@ -237,18 +237,124 @@
    - `feat(harness): --report-url / --report-token reporter (PR 4.5)` — reporter.py + cli.py 변경 + runner.py 변경 + test_reporter.py + test_runner.py emit 테스트
    - `docs: PR 4 progress-log (Session 7 — code) + Session 6 (verify recap)` — docs/progress-log.md
 
-### 다음 세션 시작 시 (PR 4 검증 + PR 5 시작)
+### Session 8 — PR 5 (Harness API + Run/Event 모델 + SSE) 코드 작성
+
+- **PR 5.1 — Prisma 마이그레이션** (`20260512000000_add_harness_run_event`):
+  - `HarnessRun` 모델: `id`, `projectId`, `startedBy`, `startedAt`, `finishedAt?`, `status` (running|passed|failed|aborted), `iterations`, `reportTokenHash` (UNIQUE), `reportTokenExpiresAt`, `configSnapshot?`. 인덱스: `[projectId, startedAt]`, `[status]`.
+  - `HarnessEvent` 모델: `id`, `runId`, `ts`, `phase` (ideation|build|verify|report), `level` (info|warn|error), `payload` Json, `createdAt`. 인덱스: `[runId, ts]`.
+  - `Project` 에 `harnessRuns HarnessRun[]` 관계 등록.
+  - 마이그레이션 SQL 은 `prisma migrate diff` 결과를 흉내 — 두 테이블 + 인덱스 5개 + FK 2개.
+- **PR 5.2 — shared 스키마** (`packages/shared/src/schemas/harness.ts`):
+  - `HarnessPhase` / `HarnessLevel` / `HarnessRunStatus` enum
+  - `StartHarnessRunSchema` (body: configSnapshot?) + `StartHarnessRunResponseSchema` (runId, reportToken, reportUrl, expiresAt)
+  - `HarnessEventInputSchema` — reporter.py 의 HttpReporter body 와 1:1 매핑 (phase, level, ts, payload)
+  - `HarnessRunSummary` / `HarnessRunDetail` / `HarnessEventSummary`
+  - `HarnessStreamFrame` — discriminated union of `snapshot` / `event` / `status` / `ping` (SSE 메시지 데이터 셰이프)
+  - `shared/src/index.ts` 에 `export * from "./schemas/harness.js"` 추가.
+- **PR 5.5 — In-memory 이벤트 브로드캐스터** (`packages/api/src/lib/harness-broker.ts` + `packages/web/src/lib/harness-broker.ts`):
+  - runId 별 listener Set 관리. `subscribe(runId, fn)` 가 unsubscribe 콜백 리턴. `publish(runId, frame)` 가 모든 listener 동기 호출.
+  - `globalThis` 에 매단 싱글턴 — Next.js dev HMR 안전. api / web 양쪽이 동일 코드 (storage abstraction 처럼 거울).
+  - **한계 (의도된 제약, progress-log 에 명시)**: 같은 Node 프로세스에서만 broadcast. Vercel multi-instance 환경에서 cross-instance pub/sub 은 추후 (PR 11 daemon WebSocket 또는 Redis pubsub).
+  - SSE 구독자 첫 연결 시 broker.subscribe → DB read → snapshot frame 전송 → live 이어받기 순서로 race 방지.
+- **PR 5.3 — Hono API 라우트** (`packages/api/src/routes/harness.ts`):
+  - 두 라우터 export — `harnessProjectRoute` (project-scoped, `/api/projects/:id/harness/*`) 와 `harnessRunRoute` (run-scoped, `/api/harness/runs/:runId/*`). app.ts 에 둘 다 마운트.
+  - `POST /:projectId/harness/start` — authMiddleware. project.harnessEnabled 검증. `randomBytes(32).toString("base64url")` 로 reportToken 발급 → SHA-256 해시 DB 저장 → 평문은 응답 1회만. `reportUrl` 은 `c.req.url.origin + /api/harness/runs/:runId/events` 절대 URL.
+  - `GET /:projectId/harness/runs` — authMiddleware. 최근 100개.
+  - `POST /:runId/events` — **authMiddleware 거치지 않음**. 자체 Bearer token 검증 (reportTokenHash 매칭). 만료 / aborted 체크. ZodValidator 로 `HarnessEventInputSchema` 검증.
+    - 부수 효과: `build` phase 의 `stage: start` 일 때만 iterations 증가 (한 iter 당 start/done 2회 emit 이라 둘 다 카운트하면 두 배).
+    - `report` 의 `outcome: pass/fail` 일 때 status 자동 결정 + finishedAt.
+    - 모든 event 는 broker.publish(runId, {kind: "event", event}) — SSE 구독자에 즉시 전달.
+  - `POST /:runId/abort` — authMiddleware + 권한. status=aborted, finishedAt 채우고 status frame publish.
+  - `GET /:runId` — authMiddleware. run + 모든 events (정렬된 배열).
+  - `GET /:runId/stream` — authMiddleware. SSE ReadableStream. snapshot → live → 30s ping → status (final 시 close). `X-Accel-Buffering: no` 헤더로 nginx 등 프록시 버퍼링 차단.
+  - 미들웨어 등록 시 주의: `harnessRunRoute.use("/:runId", authMiddleware)` 같은 path-prefix 매칭은 `/:runId/events` 까지 잡으므로, **abort / detail / stream 만 inline authMiddleware** 로 첨부 (events 는 자체 reportToken).
+  - `errors.ts` 에 `gone()` helper (410 GONE) 추가 — aborted run 에 emit 시도 시 명시적 신호.
+- **PR 5.4 — Next.js (web) API 라우트** (SaaS / Vercel 진입점, 5개 파일):
+  - `packages/web/src/lib/harness-api.ts` — Hono 라우트의 helper 들 (newReportToken / hashReportToken / requireProjectAccess / runSummary / eventSummary / statusFromEvent) 을 web 측에 거울처럼 옮김 (sync-api.ts 패턴 그대로).
+  - `web/src/lib/api-errors.ts` 에 `gone()` + GONE code 추가.
+  - 5개 라우트:
+    - `POST /api/projects/[projectId]/harness/start/route.ts`
+    - `GET  /api/projects/[projectId]/harness/runs/route.ts`
+    - `POST /api/harness/runs/[runId]/events/route.ts` (Bearer = reportToken)
+    - `POST /api/harness/runs/[runId]/abort/route.ts`
+    - `GET  /api/harness/runs/[runId]/route.ts`
+    - `GET  /api/harness/runs/[runId]/stream/route.ts` — `runtime = "nodejs"`, `dynamic = "force-dynamic"`, `maxDuration = 300`. ReadableStream + cleanup closure 동일 패턴.
+  - 인증: `requireAuthAny(req)` (Bearer or 쿠키). events 라우트는 requireAuthAny 안 거치고 자체 토큰 검증.
+- **세션 내 검증 통과 (Linux 샌드박스)**:
+  - 11개 reporter.py emit 시나리오 (runner.py 의 모든 phase/level/payload 조합 포함) 가 `HarnessEventInputSchema` 와 매칭됨을 Python 시뮬레이션으로 확인.
+  - status 자동 결정 로직: `report` + `outcome: pass` → "passed", `report` + `outcome: fail` → "failed", `build` + `stage: start` → iterations++ 만 올림. 의도대로 동작.
+  - 파일 크기 점검: harness.ts 15054B / harness-broker.ts 3097B / harness 스키마 5721B / 5개 web 라우트 합계 ~11500B. 잘림 없음.
+  - prisma validate 는 샌드박스에서 못 함 (binaries.prisma.sh 403 Forbidden). 사용자 PC 에서 검증 필요.
+- **mount sync 손상 복구** (PR 2 / PR 4 와 같은 패턴 또 발생):
+  - `packages/shared/src/index.ts` — Edit 도구로 `harness.js` export 추가했는데 bash 의 cat 으로는 마지막 줄이 빠진 상태로 보임. bash heredoc 으로 재기록 후 정상 (304B).
+  - `packages/api/prisma/schema.prisma` — 호스트 (Read 도구) 에서는 403줄 정상이지만 bash 의 tail 로 보면 343줄에서 `@@index([sessionId, order` 까지만 잘림. Python 스크립트로 HarnessRun/HarnessEvent 블록 강제 재기록 (사용자 PC 에서는 호스트 측이 정상이라 그대로 OK 예상).
+  - **사용자 PC 에서 반드시 확인** (Session 9 시작 시):
+    - `cat packages/api/prisma/schema.prisma | grep -c "model HarnessRun"` → `1` 이어야 함
+    - `cat packages/shared/src/index.ts | tail -1` → `export * from "./schemas/harness.js";` 이어야 함
+    - 잘려 있으면 Session 8 의 변경 (PR 5.1, PR 5.2 부분) 을 호스트에서 직접 재기록.
+- **알려진 잠재 이슈 / 미해결**:
+  - **report phase 의 `stage: loop_complete`** — runner.py 의 `run_loop` 가 마지막에 `rep.emit("report", "info", {"stage": "loop_complete"})` 호출. `outcome` 필드 없어 우리 statusFromEvent 는 null 리턴 → status 자동 변환 안 됨. 의도 — 일부 req 가 pass / 일부 fail 인 경우 자동 status 결정이 애매. PR 6 (UI) 에서 명시적 표시 + 사용자 abort 가능. 정 필요하면 후속 PR 로 "모든 events 의 outcome 종합" 로직 추가.
+  - **SSE Vercel maxDuration** — `maxDuration = 300` (5분). 5분 넘는 harness run 의 stream 은 클라이언트가 재연결해야 함 (EventSource 기본 자동 재연결 — snapshot frame 으로 따라잡음). PR 11 daemon WebSocket 으로 승격되면 사라질 한계.
+  - **In-memory broker** — 같은 instance 한계. Vercel 의 multi-instance / cold start 후 새 인스턴스에서는 진행 중 run 의 live event 못 받을 수 있음. 모든 event 가 DB 에 저장되므로 데이터 손실은 없고, EventSource 재연결 시 snapshot 으로 catch-up.
+  - **harness CLI 의 spawn 주체** — 지금은 start 라우트가 reportToken 발급만 하고 실제 `harness run` subprocess 는 호출하지 않음. 셀프호스팅에서는 api 가 spawn 가능하지만 SaaS (Vercel) 에서는 불가. **PR 6** (Web UI) 또는 **PR 11** (daemon) 에서 결정 — 가능한 방향: 사용자 PC 의 mytool-cli daemon 이 web 의 "Run" 클릭 신호를 받아 로컬에서 `harness run --report-url ... --report-token ...` 실행.
+  - **report 라우트 prefix 충돌 여부** — `projectsRoute`, `dashboardRoute`, `harnessProjectRoute` 셋 다 `/api/projects` 에 마운트. 각 path (`/:projectId`, `/:projectId/dashboard/*`, `/:projectId/harness/*`) 가 겹치지 않으므로 OK 이지만, 사용자 PC 에서 라우팅 한 번 sanity check 필요.
+
+#### 사용자 PC 에서 다음 검증 필요 (Session 9 시작 시)
+
+1. **mount sync 손상 점검** — 호스트에서 다음 파일들 확인:
+   - `packages/api/prisma/schema.prisma` 안에 `model HarnessRun` 과 `model HarnessEvent` 가 모두 있는지. `Project` 안에 `harnessRuns HarnessRun[]` 라인 있는지.
+   - `packages/shared/src/index.ts` 마지막 줄이 `export * from "./schemas/harness.js";` 인지.
+   - 어느 하나라도 잘려 있으면 Session 8 의 Edit/Write 결과를 참고해 호스트에서 직접 재기록.
+2. **Prisma generate + migrate**:
+   ```
+   pnpm --filter @mytool/api prisma generate
+   pnpm --filter @mytool/api prisma migrate dev
+   ```
+   `20260512000000_add_harness_run_event` 적용. 첫 시도 시 sandbox/host 동기화 차이로 schema validate 실패하면 (1) 의 복구가 필요.
+3. **타입 빌드** — `pnpm -w typecheck` 통과. 특히:
+   - `@mytool/shared` 에서 `HarnessEventInputSchema` 등이 export 되는지
+   - `harness-api.ts`, `harness-broker.ts` 모두 컴파일 통과
+   - web 의 5개 새 라우트 (events / abort / start / runs / route / stream) 모두 통과
+4. **Hono build** — `pnpm --filter @mytool/api build`. tsup esm 빌드.
+5. **Next.js build** — `pnpm --filter @mytool/web build`. 새 라우트들이 모두 인식되는지.
+6. **e2e — 실제 harness run 으로 라이브 보고 확인** (셀프호스팅 또는 dev 프로필):
+   1. web 에서 프로젝트 한 개의 harness toggle ON
+   2. `curl -X POST http://localhost:3001/api/projects/<id>/harness/start \
+       -H "Authorization: Bearer <cli-token>" \
+       -H "Content-Type: application/json" -d '{}'`
+   3. 응답에서 `runId`, `reportToken`, `reportUrl` 받기
+   4. 다른 터미널에서 SSE 수신: `curl -N http://localhost:3001/api/harness/runs/<runId>/stream \
+       -H "Authorization: Bearer <cli-token>"`
+       (브라우저 EventSource 보다 curl -N 이 디버그 편함)
+   5. harness 디렉토리에서: `cd packages/harness && harness init && \
+       harness run --report-url '<reportUrl>' --report-token '<reportToken>'`
+       (간단한 harness.yaml — verify_cmd 를 `echo ok` 같은 빨리 끝나는 명령으로 채워두면 됨)
+   6. SSE 터미널에서 phase 전이 (ideation/build/verify/report) 실시간 출력 확인. 마지막에 `event: status` `data: {"kind":"status","status":"passed",...}` 떨어지는지.
+   7. DB 확인: `psql ... -c "select phase, level, payload from harness_events where \"runId\"='<id>' order by ts"` — 11개 안팎의 row.
+7. **권한 / 보안 점검**:
+   - 다른 user 의 token 으로 `POST /:runId/events` 호출 → 401 Unauthorized (reportToken hash mismatch)
+   - reportToken 평문이 어디에도 저장 안 됨 (only hash) — DB 확인
+   - aborted run 에 events POST → 410 Gone
+   - 만료된 token 으로 events POST → 401 Unauthorized
+8. **commit 분리 권장** (5단계):
+   - `feat(db): PR 5.1 add HarnessRun / HarnessEvent models` — schema.prisma + migration.sql
+   - `feat(shared): PR 5.2 harness Run / Event / Stream schemas` — schemas/harness.ts + index.ts
+   - `feat(api): PR 5.3 harness routes (start, events, stream, abort) + broker` — routes/harness.ts + lib/harness-broker.ts + lib/errors.ts (gone) + app.ts
+   - `feat(web): PR 5.4 Next.js harness API routes (SaaS entry)` — web/app/api/harness/** + web/app/api/projects/[id]/harness/** + lib/harness-api.ts + lib/harness-broker.ts + lib/api-errors.ts (gone)
+   - `docs: PR 5 progress-log (Session 8 — code) + Session 7 verify recap` — docs/progress-log.md
+
+### 다음 세션 시작 시 (PR 5 검증 + PR 6 시작)
 
 명령어 (그대로 복사):
 
 ```
-mytool 통합 이어가자. docs/progress-log.md 의 Session 7 끝부분
-"사용자 PC 에서 다음 검증" 7개 따라 PR 4 검증 도와줘.
-통과하면 commit 분리 + PR 5 (Harness API + Run/Event 모델 + SSE) 시작.
+mytool 통합 이어가자. docs/progress-log.md 의 Session 8 끝부분
+"사용자 PC 에서 다음 검증" 8개 따라 PR 5 검증 도와줘.
+통과하면 commit 분리 + PR 6 (Harness UI — yaml 편집기 + PhaseTimeline + RunList) 시작.
 ```
 
 읽을 순서:
-1. `docs/progress-log.md` Session 7 "사용자 PC 에서 다음 검증 필요" 7개 항목
-2. mount sync 손상 가능성 (1번) 부터 — 손상 발견 시 Session 7 의 diff 로 복구
-3. 검증 통과 시 commit 분리 (PR 4.1 ~ 4.5 + progress-log)
-4. PR 5 시작: integration-plan §6.2, §8 PR 5 참고. `HarnessRun` / `HarnessEvent` 마이그레이션부터.
+1. `docs/progress-log.md` Session 8 "사용자 PC 에서 다음 검증 필요" 8개 항목
+2. mount sync 손상 가능성 (1번) 부터 — 손상 발견 시 Session 8 의 변경 내용으로 복구
+3. 검증 통과 시 commit 분리 (PR 5.1 ~ 5.4 + progress-log)
+4. PR 6 시작: integration-plan §7.2 ("Harness 섹션 — yaml 편집기 (Monaco) + Run 버튼 + 진행 상황"), §8 PR 6 참고. yaml 편집기와 PhaseTimeline 부터.
